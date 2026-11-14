@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
@@ -309,6 +310,42 @@ func TestHelmInstallerAdoptsDeployedChart(t *testing.T) {
 	}
 	if got.Status.DeployedChartHash == "" {
 		t.Errorf("no deployedChartHash")
+	}
+}
+
+// The values may hold secrets: the install logs their hash, never the values.
+func TestHelmInstallerLogsNoValues(t *testing.T) {
+	var lines []string
+	vc := ownedVCluster()
+	vc.Spec.HelmRelease = &infrastructurev1alpha1.VirtualClusterHelmRelease{Values: "password: s3cr3t"}
+	c := fakeclient.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithObjects(vc, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "ns"}},
+			&clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "ns"}}).
+		WithStatusSubresource(&infrastructurev1alpha1.VCluster{}).
+		Build()
+	h := &countingHelm{}
+	r := &GenericReconciler{
+		Client:            c,
+		HelmClient:        h,
+		Log:               funcr.New(func(_, args string) { lines = append(lines, args) }, funcr.Options{Verbosity: 10}),
+		Scheme:            c.Scheme(),
+		clusterKindExists: true,
+		HTTPClientGetter:  NewHTTPClientGetter(),
+		New:               func() GenericVCluster { return &infrastructurev1alpha1.VCluster{} },
+	}
+	for range 2 {
+		_, _ = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "ns", Name: "vc1"}})
+	}
+	if h.upgrades != 1 {
+		t.Fatalf("helm upgrades: %d, want 1", h.upgrades)
+	}
+	logged := strings.Join(lines, "\n")
+	if strings.Contains(logged, "s3cr3t") {
+		t.Errorf("values logged:\n%s", logged)
+	}
+	if !strings.Contains(logged, `"valuesHash"="`+sha256Hex("password: s3cr3t")+`"`) {
+		t.Errorf("no valuesHash logged:\n%s", logged)
 	}
 }
 

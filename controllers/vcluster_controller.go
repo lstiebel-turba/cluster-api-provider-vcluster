@@ -413,6 +413,11 @@ func (c chartSpec) hash() string {
 	return sha256Hex(strings.Join([]string{c.repo, c.name, c.version, c.values}, "\x00"))
 }
 
+// valuesHash identifies the values in logs, which may hold secrets.
+func (c chartSpec) valuesHash() string {
+	return sha256Hex(c.values)
+}
+
 func sha256Hex(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])
@@ -464,6 +469,7 @@ func (r *GenericReconciler) redeployIfNeeded(ctx context.Context, vCluster Gener
 	logger := r.Log
 	chartRepo, chartName, chartVersion, values := chart.repo, chart.name, chart.version, chart.values
 
+	// the values may hold secrets: their hash only
 	action := "deploying vcluster"
 	if deployed {
 		action = "upgrading vcluster"
@@ -474,7 +480,7 @@ func (r *GenericReconciler) redeployIfNeeded(ctx context.Context, vCluster Gener
 		"chartRepo", chartRepo,
 		"chartName", chartName,
 		"chartVersion", chartVersion,
-		"values", values,
+		"valuesHash", chart.valuesHash(),
 	)
 
 	var chartPath string

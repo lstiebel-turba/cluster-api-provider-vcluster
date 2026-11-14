@@ -108,7 +108,7 @@ type GenericVCluster interface {
 //+kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=list;delete
 
 func (r *GenericReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Result, reterr error) {
-	r.Log.Info("Reconcile vCluster", "namespacedName", req.NamespacedName)
+	r.Log.V(1).Info("Reconcile vCluster", "namespacedName", req.NamespacedName)
 
 	// get virtual cluster object
 	vCluster := r.New()

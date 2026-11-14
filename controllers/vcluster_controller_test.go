@@ -788,3 +788,58 @@ func TestFluxRepositoryProviderOnlyForOCI(t *testing.T) {
 		t.Errorf("type on an HTTP repository: %v", spec)
 	}
 }
+
+// foreignHelmRelease is a HelmRelease named after the VCluster that another controller owns
+// (an adoption that failed): the provider must neither suspend nor delete it.
+func foreignHelmRelease() *unstructured.Unstructured {
+	hr := newUnstructured(helmReleaseGVK, "ns", "vc1")
+	hr.Object["spec"] = map[string]any{"suspend": false}
+	hr.SetOwnerReferences([]metav1.OwnerReference{{
+		APIVersion: "kustomize.toolkit.fluxcd.io/v1",
+		Kind:       "Kustomization",
+		Name:       "tenant",
+		UID:        "other",
+		Controller: ptr.To(true),
+	}})
+	return hr
+}
+
+func TestFluxInstallerLeavesForeignHelmRelease(t *testing.T) {
+	deleted, kept := chartVolumes()
+	cluster := &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "ns"}, Spec: clusterv1.ClusterSpec{Paused: ptr.To(true)}}
+	e := newFluxEnv(t, append(append([]client.Object{cluster, fluxVCluster(), foreignHelmRelease()}, deleted...), kept...)...)
+	e.reconcile(2)
+	if s, _, _ := unstructured.NestedBool(e.helmRelease().Object, "spec", "suspend"); s {
+		t.Errorf("foreign HelmRelease suspended")
+	}
+
+	vc := &infrastructurev1alpha1.VCluster{}
+	if err := e.c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "vc1"}, vc); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "c1"}, cluster); err != nil {
+		t.Fatal(err)
+	}
+	cluster.Spec.Paused = ptr.To(false)
+	if err := e.c.Update(context.Background(), cluster); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.c.Delete(context.Background(), vc); err != nil {
+		t.Fatal(err)
+	}
+	e.reconcile(1)
+
+	hr := e.helmRelease()
+	if hr.GetDeletionTimestamp() != nil {
+		t.Errorf("foreign HelmRelease deleted")
+	}
+	if owner := metav1.GetControllerOf(hr); owner == nil || owner.Kind != "Kustomization" {
+		t.Errorf("foreign HelmRelease owner: %+v", owner)
+	}
+	if got := e.volumes(); len(got) != len(deleted)+len(kept) {
+		t.Errorf("volumes deleted with a foreign HelmRelease: %v", got)
+	}
+	if err := e.c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "vc1"}, vc); !kerrors.IsNotFound(err) {
+		t.Errorf("VCluster still there: %v %v", err, vc.Finalizers)
+	}
+}

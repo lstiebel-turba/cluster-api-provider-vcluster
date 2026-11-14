@@ -145,10 +145,15 @@ func (r *GenericReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ 
 			return ctrl.Result{}, nil
 		}
 
+		owned := true
 		if r.installer(vCluster) == infrastructurev1alpha1.FluxInstaller {
-			gone, err := r.fluxRemove(ctx, vCluster)
-			if err != nil || !gone {
-				return ctrl.Result{RequeueAfter: 5 * time.Second}, err
+			var gone bool
+			gone, owned, err = r.fluxRemove(ctx, vCluster)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if !gone {
+				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 			}
 		} else {
 			err = deleteHelmChart(ctx, r.HelmClient, r.HelmSecrets, req.Namespace, req.Name, r.Log)
@@ -157,9 +162,11 @@ func (r *GenericReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ 
 			}
 		}
 
-		// the chart is gone: its volumes go too
-		if err := r.deleteVolumes(ctx, vCluster); err != nil {
-			return ctrl.Result{}, err
+		// the chart is gone: its volumes go too, unless the chart wasn't the provider's
+		if owned {
+			if err := r.deleteVolumes(ctx, vCluster); err != nil {
+				return ctrl.Result{}, err
+			}
 		}
 
 		return ctrl.Result{}, RemoveFinalizer(ctx, r.Client, vCluster, CleanupFinalizer)

@@ -219,6 +219,7 @@ func readHelmRelease(release *unstructured.Unstructured) fluxState {
 }
 
 // fluxSuspend sets the HelmRelease's spec.suspend, while the Cluster or the VCluster is paused.
+// A HelmRelease the VCluster doesn't control (someone else's, an adoption that failed) stays as it is.
 func (r *GenericReconciler) fluxSuspend(ctx context.Context, vCluster GenericVCluster, suspend bool) error {
 	release := newUnstructured(helmReleaseGVK, vCluster.GetNamespace(), vCluster.GetName())
 	err := r.Client.Get(ctx, types.NamespacedName{Namespace: vCluster.GetNamespace(), Name: vCluster.GetName()}, release)
@@ -228,6 +229,13 @@ func (r *GenericReconciler) fluxSuspend(ctx context.Context, vCluster GenericVCl
 	if err != nil {
 		return err
 	}
+	if !metav1.IsControlledBy(release, vCluster) {
+		return nil
+	}
+	return r.fluxSetSuspend(ctx, release, suspend)
+}
+
+func (r *GenericReconciler) fluxSetSuspend(ctx context.Context, release *unstructured.Unstructured, suspend bool) error {
 	if current, _, _ := unstructured.NestedBool(release.Object, "spec", "suspend"); current == suspend {
 		return nil
 	}
@@ -239,24 +247,29 @@ func (r *GenericReconciler) fluxSuspend(ctx context.Context, vCluster GenericVCl
 }
 
 // fluxRemove deletes the HelmRelease, Flux uninstalls the chart; gone once it no longer exists.
-// A per-VCluster HelmRepository goes with the VCluster (owner reference).
-func (r *GenericReconciler) fluxRemove(ctx context.Context, vCluster GenericVCluster) (bool, error) {
+// A per-VCluster HelmRepository goes with the VCluster (owner reference). A HelmRelease of that
+// name the VCluster doesn't control is left alone: gone, but not owned, so the chart's volumes
+// stay too.
+func (r *GenericReconciler) fluxRemove(ctx context.Context, vCluster GenericVCluster) (gone, owned bool, err error) {
 	release := newUnstructured(helmReleaseGVK, vCluster.GetNamespace(), vCluster.GetName())
-	err := r.Client.Get(ctx, types.NamespacedName{Namespace: vCluster.GetNamespace(), Name: vCluster.GetName()}, release)
+	err = r.Client.Get(ctx, types.NamespacedName{Namespace: vCluster.GetNamespace(), Name: vCluster.GetName()}, release)
 	if kerrors.IsNotFound(err) {
-		return true, nil
+		return true, true, nil
 	}
 	if err != nil {
-		return false, err
+		return false, false, err
+	}
+	if !metav1.IsControlledBy(release, vCluster) {
+		return true, false, nil
 	}
 	if release.GetDeletionTimestamp() == nil {
 		// helm-controller skips the uninstall of a suspended HelmRelease
-		if err := r.fluxSuspend(ctx, vCluster, false); err != nil {
-			return false, err
+		if err := r.fluxSetSuspend(ctx, release, false); err != nil {
+			return false, true, err
 		}
 		if err := r.Client.Delete(ctx, release); err != nil && !kerrors.IsNotFound(err) {
-			return false, err
+			return false, true, err
 		}
 	}
-	return false, nil
+	return false, true, nil
 }

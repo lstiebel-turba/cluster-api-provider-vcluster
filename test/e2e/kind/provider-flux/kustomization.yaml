@@ -1,0 +1,26 @@
+# The provider as config/flux-installer/namespaced deploys it (the production overlay), with the
+# image hack/e2e-kind.sh built and loaded into kind (never pulled) and --namespace-selector on the
+# label hack/e2e-kind.sh sets on each vcluster-* namespace, where it also binds
+# capvc-manager-namespace-role.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../../../config/flux-installer/namespaced
+
+images:
+  - name: ghcr.io/loft-sh/cluster-api-provider-vcluster
+    newName: capvc.local/cluster-api-provider-vcluster
+    newTag: e2e
+
+patches:
+  - target:
+      kind: Deployment
+      name: capvc-controller-manager
+    patch: |
+      - op: replace
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Never
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --namespace-selector=turba-env.dev/tenant

@@ -133,9 +133,11 @@ spec:
 ## End-to-end test
 
 `make e2e-kind INSTALLER=helm` (or `flux`) runs `hack/e2e-kind.sh`: a kind cluster with Cluster API
-core, cert-manager, the provider image built from this checkout and, for `flux`, Flux's
-source- and helm-controller; then a real vCluster (values `test/e2e/kind/vcluster.yaml`) is created,
-parked and woken, deleted and, for `flux`, adopted from a hand-written HelmRelease. Needs kind,
+core, cert-manager, the provider image built from this checkout (`helm`: `config/default`; `flux`:
+`config/flux-installer/namespaced` with a RoleBinding per namespace and `--namespace-selector`) and,
+for `flux`, Flux's source- and helm-controller; then a real vCluster (values
+`test/e2e/kind/vcluster.yaml`) is created, parked and woken, deleted and, for `flux`, adopted from a
+hand-written HelmRelease. Needs kind,
 kubectl, curl and docker (or podman with `KIND_EXPERIMENTAL_PROVIDER=podman`); the header of the
 script lists its options. CI runs it on every pull request (`.github/workflows/e2e-kind.yaml`).
 

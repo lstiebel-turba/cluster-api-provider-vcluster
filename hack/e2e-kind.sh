@@ -11,7 +11,12 @@
 #   3. delete  Cluster gone → VCluster, release and workloads gone, the namespace deletes
 #   4. adopt   (flux) a hand-written HelmRelease <name>, as Turbacharger's controller writes it
 #              today, suspended and taken over by a VCluster of the same name: the control plane
-#              keeps running (same pod) and its data
+#              keeps running (same pod, same helm revision) and its data
+#
+# The provider: helm config/default (test/e2e/kind/provider); flux the production overlay
+# config/flux-installer/namespaced (test/e2e/kind/provider-flux): the cluster-wide role, a
+# RoleBinding of capvc-manager-namespace-role in each vcluster-* namespace and
+# --namespace-selector=turba-env.dev/tenant, the label each namespace gets.
 #
 # Environment:
 #   KIND_CLUSTER       kind cluster name (default capvc-e2e); reused if it exists
@@ -45,12 +50,21 @@ SOURCE_CONTROLLER_VERSION="v1.9.6"
 HELM_CONTROLLER_VERSION="v1.6.5"
 # renovate: datasource=github-releases depName=prometheus-operator/prometheus-operator
 PROMETHEUS_OPERATOR_VERSION="v0.95.2" # ServiceMonitor CRD only
+# sha256 of the downloads (a version bump changes them)
+CERT_MANAGER_SHA256="f015cc08b45072695fd63ea4e0382953cd87f95fc4a837c7c8a9810c0bd7366e"           # cert-manager.yaml
+CAPI_SHA256="f28647b6c20956d56fd8a678bf477821036bea71f1a1318d9cacdc413c779957"                   # core-components.yaml
+SERVICEMONITOR_CRD_SHA256="373fabaf6f5b68c5a155fa94486d4e8a2863c4aa6478b066a62d0767cd86ab1f"     # monitoring.coreos.com_servicemonitors.yaml
+SOURCE_CONTROLLER_CRDS_SHA256="5acf3b01c24f15647a162f2d43b1287f0d0156fab0026f4afb9865874cdbe16d" # source-controller.crds.yaml
+SOURCE_CONTROLLER_SHA256="381b2d0fc1559b48fbb65ed5d2c7a713298abd58a77145f8a7bb53d494150efb"      # source-controller.deployment.yaml
+HELM_CONTROLLER_CRDS_SHA256="8af19966e63cccde7d2c62e24c7bd3466010dd53e9d063e2ce22d1391e11f272"   # helm-controller.crds.yaml
+HELM_CONTROLLER_SHA256="70af0c37465d1f18fac583b16c438fbe9ccc1b9ddda13431e324b13f4e865b64"        # helm-controller.deployment.yaml
 # renovate: datasource=helm depName=vcluster registryUrl=https://charts.loft.sh
 VCLUSTER_CHART_VERSION="0.37.6"
 VCLUSTER_CHART_REPO="https://charts.loft.sh"
 
 PROVIDER_IMAGE="capvc.local/cluster-api-provider-vcluster:e2e" # test/e2e/kind/provider
 PRIORITY_CLASS="turba-env-tenant-system"
+TENANT_LABEL="turba-env.dev/tenant" # on each vcluster-* namespace; flux: the provider's --namespace-selector
 MONITOR_TLS_ANNOTATION="turba-env.dev/monitor-tls"
 
 KIND_CLUSTER="${KIND_CLUSTER:-capvc-e2e}"
@@ -138,14 +152,30 @@ on_exit() {
   summary
   if ((rc == 0)) && [[ "${KEEP_CLUSTER:-}" != 1 ]]; then
     kind delete cluster --name "$KIND_CLUSTER" >/dev/null 2>&1 || true
+    rm -rf "$WORK"
+  elif ((rc != 0)) && [[ "$ARTIFACTS" == "$WORK"/* ]]; then
+    echo "kind cluster $KIND_CLUSTER and $WORK (diagnostics) kept: KUBECONFIG=$KUBECONFIG"
   else
     echo "kind cluster $KIND_CLUSTER kept: KUBECONFIG=$KUBECONFIG"
+    find "$WORK" -mindepth 1 -maxdepth 1 ! -name kind.kubeconfig -exec rm -rf {} +
   fi
   exit "$rc"
 }
 trap on_exit EXIT
 
 # --- setup --------------------------------------------------------------------------------------
+
+sha256() { (sha256sum "$1" 2>/dev/null || shasum -a 256 "$1") | cut -d' ' -f1; }
+
+# fetch <url> <sha256>: downloads into $WORK, refuses a checksum mismatch, prints the path
+fetch() {
+  local url="$1" want="$2" dest got
+  dest="$WORK/download.$(basename "$url")"
+  curl -fsSL --retry 3 -o "$dest" "$url" || fail "download $url"
+  got="$(sha256 "$dest")"
+  [[ "$got" == "$want" ]] || fail "$url: sha256 $got, hack/e2e-kind.sh pins $want"
+  echo "$dest"
+}
 
 wait_deployments() { # <namespace>
   kubectl -n "$1" wait deployment --all --for=condition=Available --timeout=300s >/dev/null
@@ -163,13 +193,15 @@ setup_kind() {
 
 setup_dependencies() {
   log "cert-manager $CERT_MANAGER_VERSION"
-  kubectl apply --server-side -f "https://github.com/cert-manager/cert-manager/releases/download/$CERT_MANAGER_VERSION/cert-manager.yaml" >/dev/null
+  local file
+  file="$(fetch "https://github.com/cert-manager/cert-manager/releases/download/$CERT_MANAGER_VERSION/cert-manager.yaml" "$CERT_MANAGER_SHA256")"
+  kubectl apply --server-side -f "$file" >/dev/null
   wait_deployments cert-manager
 
   log "Cluster API $CAPI_VERSION core"
   # clusterctl's variables with their defaults (${VAR:=default} → default)
-  curl -fsSL "https://github.com/kubernetes-sigs/cluster-api/releases/download/$CAPI_VERSION/core-components.yaml" |
-    sed -E 's/\$\{[A-Za-z0-9_]+:=([^}]*)\}/\1/g' >"$WORK/capi.yaml"
+  file="$(fetch "https://github.com/kubernetes-sigs/cluster-api/releases/download/$CAPI_VERSION/core-components.yaml" "$CAPI_SHA256")"
+  sed -E 's/\$\{[A-Za-z0-9_]+:=([^}]*)\}/\1/g' "$file" >"$WORK/capi.yaml"
   # shellcheck disable=SC2016 # a literal ${
   if grep -q '\${' "$WORK/capi.yaml"; then fail "core-components.yaml has a variable without a default"; fi
   # the webhook's certificate comes from cert-manager: retry until its webhook answers
@@ -182,7 +214,8 @@ setup_dependencies() {
   wait_deployments capi-system
 
   log "ServiceMonitor CRD ($PROMETHEUS_OPERATOR_VERSION), PriorityClass $PRIORITY_CLASS"
-  kubectl apply --server-side -f "https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/$PROMETHEUS_OPERATOR_VERSION/example/prometheus-operator-crd/monitoring.coreos.com_servicemonitors.yaml" >/dev/null
+  file="$(fetch "https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/$PROMETHEUS_OPERATOR_VERSION/example/prometheus-operator-crd/monitoring.coreos.com_servicemonitors.yaml" "$SERVICEMONITOR_CRD_SHA256")"
+  kubectl apply --server-side -f "$file" >/dev/null
   kubectl apply -f - >/dev/null <<EOF
 apiVersion: scheduling.k8s.io/v1
 kind: PriorityClass
@@ -196,11 +229,14 @@ EOF
   if [[ "$INSTALLER" == flux ]]; then
     log "Flux source-controller $SOURCE_CONTROLLER_VERSION, helm-controller $HELM_CONTROLLER_VERSION"
     kubectl create namespace flux-system --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-    local base
-    for base in "fluxcd/source-controller/releases/download/$SOURCE_CONTROLLER_VERSION/source-controller" \
-      "fluxcd/helm-controller/releases/download/$HELM_CONTROLLER_VERSION/helm-controller"; do
-      kubectl apply --server-side -f "https://github.com/$base.crds.yaml" >/dev/null
-      kubectl apply --server-side -n flux-system -f "https://github.com/$base.deployment.yaml" >/dev/null
+    local base crds deployment
+    for base in "source-controller/releases/download/$SOURCE_CONTROLLER_VERSION/source-controller $SOURCE_CONTROLLER_CRDS_SHA256 $SOURCE_CONTROLLER_SHA256" \
+      "helm-controller/releases/download/$HELM_CONTROLLER_VERSION/helm-controller $HELM_CONTROLLER_CRDS_SHA256 $HELM_CONTROLLER_SHA256"; do
+      read -r base crds deployment <<<"$base"
+      file="$(fetch "https://github.com/fluxcd/$base.crds.yaml" "$crds")"
+      kubectl apply --server-side -f "$file" >/dev/null
+      file="$(fetch "https://github.com/fluxcd/$base.deployment.yaml" "$deployment")"
+      kubectl apply --server-side -n flux-system -f "$file" >/dev/null
     done
     # both run as flux-system's default ServiceAccount (flux2's install binds cluster-admin too)
     kubectl create clusterrolebinding flux-e2e --clusterrole=cluster-admin \
@@ -217,8 +253,15 @@ setup_provider() {
     kind load image-archive "$WORK/provider.tar" --name "$KIND_CLUSTER"
     rm -f "$WORK/provider.tar"
   fi
-  log "provider (config/default via test/e2e/kind/provider)"
-  kubectl kustomize "$ROOT/test/e2e/kind/provider" | kubectl apply --server-side -f - >/dev/null
+  local overlay=provider
+  [[ "$INSTALLER" == helm ]] || overlay=provider-flux
+  log "provider (test/e2e/kind/$overlay)"
+  kubectl kustomize "$ROOT/test/e2e/kind/$overlay" | kubectl apply --server-side -f - >/dev/null
+  if [[ "$INSTALLER" == flux ]]; then
+    # a reused kind cluster: no cluster-wide rights of the helm leg's config/default
+    kubectl delete clusterrolebinding capvc-manager-rolebinding capvc-helm-installer-rolebinding \
+      --ignore-not-found >/dev/null
+  fi
   kubectl -n capvc-system rollout restart deployment/capvc-controller-manager >/dev/null
   kubectl -n capvc-system rollout status deployment/capvc-controller-manager --timeout=180s >/dev/null
 }
@@ -258,6 +301,12 @@ EOF
 prepare_namespace() { # <name>
   CURRENT_NS="vcluster-$1"
   kubectl create namespace "$CURRENT_NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  kubectl label namespace "$CURRENT_NS" "$TENANT_LABEL=$1" --overwrite >/dev/null
+  if [[ "$INSTALLER" == flux ]]; then
+    # config/flux-installer/namespaced: the provider's rights in this namespace (config/rbac/README.md)
+    kubectl create rolebinding capvc-manager -n "$CURRENT_NS" --clusterrole=capvc-manager-namespace-role \
+      --serviceaccount=capvc-system:capvc-controller-manager --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  fi
   # sync.fromHost.nodes selects turba-env.dev/tenant=<name>, as NAP labels a tenant's nodes
   kubectl label nodes --all "turba-env.dev/tenant=$1" --overwrite >/dev/null
 }
@@ -354,9 +403,9 @@ ready_replicas() { jp "$1" -n "$2" "$3" -o jsonpath='{.status.readyReplicas}'; }
 ready_is() { [[ "$(ready_replicas "$1" "$2" "$3")" == "$4" ]]; }
 no_release() { [[ -z "$(release_secrets "$1")" ]]; }
 no_pvcs() { [[ -z "$(kubectl get pvc -n "$1" -o name 2>/dev/null)" ]]; }
-nothing_left() { # everything but the namespace's own ConfigMap and ServiceAccount
+nothing_left() { # everything but the namespace's own ConfigMap and ServiceAccount and the provider's RoleBinding
   ! kubectl get secrets,configmaps,serviceaccounts,services,roles,rolebindings,servicemonitors -n "$1" -o name 2>/dev/null |
-    grep -qv -e '^configmap/kube-root-ca.crt$' -e '^serviceaccount/default$'
+    grep -qv -e '^configmap/kube-root-ca.crt$' -e '^serviceaccount/default$' -e '^rolebinding.rbac.authorization.k8s.io/capvc-manager$'
 }
 no_pods() { [[ -z "$(kubectl get pods -n "$1" -l "$2" -o name 2>/dev/null)" ]]; }
 
@@ -414,8 +463,8 @@ scenario_park_wake() { # <name>
   etcd_replicas="$(replicas sts "$ns" "$name-etcd")"
 
   kubectl patch cluster.cluster.x-k8s.io -n "$ns" "$name" --type merge -p '{"spec":{"paused":true}}' >/dev/null
-  # no Cluster watch either: the pause shows at the next requeue (RequeueAfter 1 min)
-  wait_until 120 "VCluster Paused condition True" vcluster_condition "$name" Paused True
+  # the provider watches the Cluster's pause (controllers: SetupWithManager)
+  wait_until 60 "VCluster Paused condition True" vcluster_condition "$name" Paused True
   if [[ "$INSTALLER" == flux ]]; then
     wait_until 120 "HelmRelease $name suspended" hr_suspended "$name" true
   fi
@@ -600,11 +649,7 @@ adopt_checks() {
   after_etcd="$(pod_identity "$ns" "app=vcluster-etcd,release=$name")"
   after_rev="$(release_revision "$name")"
   printf 'after:\n%s\n%s\nrevision %s\n' "$after_cp" "$after_etcd" "$after_rev" >>"$ARTIFACTS/adopt-pods.txt"
-  if [[ "$after_rev" != "$before_rev" ]]; then
-    note "adoption upgraded the helm release: revision $before_rev → $after_rev"
-  else
-    pass "adoption left the helm release at revision $before_rev"
-  fi
+  adopt_check "adopted: helm release still at revision $before_rev (got $after_rev)" test "$after_rev" == "$before_rev" || return 1
   adopt_check "adopted: control plane pod not restarted (same UID, start time, restarts)" test "$after_cp" == "$before_cp" || return 1
   adopt_check "adopted: etcd pod not restarted" test "$after_etcd" == "$before_etcd" || return 1
   adopt_check "adopted: API answers through Secret $name-kubeconfig" poll 120 vc_api_answers "$name" "$name-kubeconfig" value || return 1

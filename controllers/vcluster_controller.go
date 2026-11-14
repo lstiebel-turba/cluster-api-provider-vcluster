@@ -31,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -43,8 +44,14 @@ import (
 	"sigs.k8s.io/cluster-api/util/patch"
 	"sigs.k8s.io/cluster-api/util/paused"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	infrastructurev1alpha1 "github.com/loft-sh/cluster-api-provider-vcluster/api/infrastructure/v1alpha1"
 	"github.com/loft-sh/cluster-api-provider-vcluster/pkg/constants"
@@ -667,8 +674,53 @@ func (r *GenericReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return err
 	}
 
-	return ctrl.NewControllerManagedBy(mgr).
+	b := ctrl.NewControllerManagedBy(mgr).
 		For(r.New()).
-		Named(r.ControllerName).
-		Complete(r)
+		Named(r.ControllerName)
+	if r.clusterKindExists {
+		gvk, err := apiutil.GVKForObject(r.New(), mgr.GetScheme())
+		if err != nil {
+			return err
+		}
+		// a paused VCluster isn't requeued: the Cluster's pause and unpause must reach it
+		b = b.Watches(&clusterv1.Cluster{}, handler.EnqueueRequestsFromMapFunc(clusterToVCluster(gvk)),
+			builder.WithPredicates(clusterPauseChanged()))
+	}
+	return b.Complete(r)
+}
+
+// clusterToVCluster maps a Cluster to its infrastructure and control plane references of kind gvk.
+func clusterToVCluster(gvk schema.GroupVersionKind) handler.MapFunc {
+	return func(_ context.Context, obj client.Object) []reconcile.Request {
+		cluster, ok := obj.(*clusterv1.Cluster)
+		if !ok {
+			return nil
+		}
+		var requests []reconcile.Request
+		for _, ref := range []clusterv1.ContractVersionedObjectReference{cluster.Spec.InfrastructureRef, cluster.Spec.ControlPlaneRef} {
+			if ref.APIGroup == gvk.Group && ref.Kind == gvk.Kind && ref.Name != "" {
+				requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: cluster.Namespace, Name: ref.Name}})
+			}
+		}
+		return requests
+	}
+}
+
+// clusterPauseChanged passes a Cluster update that pauses or unpauses it (spec.paused or the
+// paused annotation).
+func clusterPauseChanged() predicate.Predicate {
+	return predicate.Funcs{
+		CreateFunc:  func(event.CreateEvent) bool { return false },
+		DeleteFunc:  func(event.DeleteEvent) bool { return false },
+		GenericFunc: func(event.GenericEvent) bool { return false },
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldCluster, ok1 := e.ObjectOld.(*clusterv1.Cluster)
+			newCluster, ok2 := e.ObjectNew.(*clusterv1.Cluster)
+			if !ok1 || !ok2 {
+				return false
+			}
+			return ptr.Deref(oldCluster.Spec.Paused, false) != ptr.Deref(newCluster.Spec.Paused, false) ||
+				annotations.HasPaused(oldCluster) != annotations.HasPaused(newCluster)
+		},
+	}
 }

@@ -346,6 +346,11 @@ replicas() { jp "$1" -n "$2" "$3" -o jsonpath='{.spec.replicas}'; }
 ready_replicas() { jp "$1" -n "$2" "$3" -o jsonpath='{.status.readyReplicas}'; }
 ready_is() { [[ "$(ready_replicas "$1" "$2" "$3")" == "$4" ]]; }
 no_release() { [[ -z "$(release_secrets "$1")" ]]; }
+no_pvcs() { [[ -z "$(kubectl get pvc -n "$1" -o name 2>/dev/null)" ]]; }
+nothing_left() { # everything but the namespace's own ConfigMap and ServiceAccount
+  ! kubectl get secrets,configmaps,serviceaccounts,services,roles,rolebindings,servicemonitors -n "$1" -o name 2>/dev/null |
+    grep -qv -e '^configmap/kube-root-ca.crt$' -e '^serviceaccount/default$'
+}
 no_pods() { [[ -z "$(kubectl get pods -n "$1" -l "$2" -o name 2>/dev/null)" ]]; }
 
 hr_suspended() { [[ "$(jp helmrelease.helm.toolkit.fluxcd.io -n "vcluster-$1" "$1" -o jsonpath='{.spec.suspend}')" == "$2" ]]; }
@@ -433,21 +438,8 @@ scenario_park_wake() { # <name>
   kubectl patch cluster.cluster.x-k8s.io -n "$ns" "$name" --type merge -p '{"spec":{"paused":false}}' >/dev/null
   kubectl scale -n "$ns" "sts/$name-etcd" --replicas="${etcd_replicas:-1}" >/dev/null
   kubectl scale -n "$ns" "deploy/$name" --replicas="${cp_replicas:-1}" >/dev/null
-  # KNOWN PROVIDER BUG (expected failure, kept visible): the provider watches only VClusters
-  # (controllers/vcluster_controller.go, SetupWithManager) and returns a paused VCluster without a
-  # requeue, so unpausing the Cluster doesn't reconcile it (flux: the HelmRelease stays suspended)
-  # until the VCluster itself changes. Recorded as a NOTE, then an annotation wakes it;
-  # STRICT_UNPAUSE=1 fails here instead.
-  if poll 60 vcluster_condition "$name" Paused False; then
-    pass "VCluster Paused condition False after the Cluster's unpause"
-  elif [[ "${STRICT_UNPAUSE:-}" == 1 ]]; then
-    fail "VCluster still Paused 60s after the Cluster's unpause"
-  else
-    note "KNOWN BUG: VCluster still Paused 60s after the Cluster's unpause (no Cluster watch); nudged by an annotation"
-    kubectl annotate vcluster.infrastructure.cluster.x-k8s.io -n "$ns" "$name" --overwrite \
-      "e2e.turba-env.dev/nudge=$(date -u +%Y%m%dT%H%M%SZ)" >/dev/null
-    wait_until 60 "VCluster Paused condition False after the nudge" vcluster_condition "$name" Paused False
-  fi
+  # the provider watches the Cluster's pause (controllers: SetupWithManager)
+  wait_until 60 "VCluster Paused condition False after the Cluster's unpause" vcluster_condition "$name" Paused False
   if [[ "$INSTALLER" == flux ]]; then
     wait_until 60 "HelmRelease $name resumed" hr_suspended "$name" false
   fi
@@ -476,13 +468,9 @@ scenario_delete() { # <name>
   wait_until 120 "StatefulSet $name-etcd gone" gone sts -n "$ns" "$name-etcd"
   wait_until 180 "vCluster pods gone" no_pods "$ns" "release=$name"
 
-  local pvcs leftovers
-  pvcs="$(kubectl get pvc -n "$ns" -o jsonpath='{range .items[*]}{.metadata.name} {end}')"
-  if [[ -n "$pvcs" ]]; then note "PVCs left in $ns: $pvcs"; else pass "no PVC left in $ns"; fi
-  # what else stays: everything but the namespace's own ConfigMap and ServiceAccount
-  leftovers="$(kubectl get secrets,configmaps,serviceaccounts,services,roles,rolebindings,servicemonitors -n "$ns" -o name 2>/dev/null |
-    grep -v -e '^configmap/kube-root-ca.crt$' -e '^serviceaccount/default$' | tr '\n' ' ' || true)"
-  if [[ -n "$leftovers" ]]; then note "left in $ns after delete: $leftovers"; else pass "nothing else left in $ns"; fi
+  # the provider deletes the chart's PVCs; garbage collection the Secrets it owns
+  wait_until 120 "no PVC left in $ns" no_pvcs "$ns"
+  wait_until 120 "nothing else left in $ns" nothing_left "$ns"
 
   kubectl delete namespace "$ns" --wait=false >/dev/null
   wait_until 180 "namespace $ns deleted" gone namespace "$ns"

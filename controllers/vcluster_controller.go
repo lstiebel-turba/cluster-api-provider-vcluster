@@ -606,7 +606,8 @@ func (r *GenericReconciler) syncVClusterKubeconfig(ctx context.Context, vCluster
 		kubeSecret.Data = map[string][]byte{
 			KubeconfigDataName: outKubeConfig,
 		}
-		return nil
+		// owned by the VCluster: deleted with it
+		return controllerutil.SetControllerReference(vCluster, kubeSecret, r.Client.Scheme())
 	})
 	if err != nil {
 		return nil, fmt.Errorf("can not create a kubeconfig secret: %w", err)
@@ -632,10 +633,10 @@ func (r *GenericReconciler) syncVClusterKubeconfig(ctx context.Context, vCluster
 			TLSKeyDataName: certsSecret.Data["ca.key"],
 			TLSCrtDataName: certsSecret.Data["ca.crt"],
 		}
-		return nil
+		return controllerutil.SetControllerReference(vCluster, caSecret, r.Client.Scheme())
 	})
 	if err != nil {
-		return nil, fmt.Errorf("can not create a kubeconfig secret: %w", err)
+		return nil, fmt.Errorf("can not create a ca secret: %w", err)
 	}
 
 	markTrue(vCluster, infrastructurev1alpha1.KubeconfigReadyCondition)

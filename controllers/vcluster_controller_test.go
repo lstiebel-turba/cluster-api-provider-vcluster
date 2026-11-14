@@ -77,6 +77,17 @@ func reconcileOnce(t *testing.T, objs ...client.Object) (*countingHelm, *infrast
 
 func reconcileWith(t *testing.T, options Options, objs ...client.Object) (*countingHelm, *infrastructurev1alpha1.VCluster) {
 	t.Helper()
+	return reconcileTwice(t, false, options, objs...)
+}
+
+// reconcileExpectErr is reconcileWith for a deploy that fails: Reconcile returns the error.
+func reconcileExpectErr(t *testing.T, options Options, objs ...client.Object) (*countingHelm, *infrastructurev1alpha1.VCluster) {
+	t.Helper()
+	return reconcileTwice(t, true, options, objs...)
+}
+
+func reconcileTwice(t *testing.T, expectErr bool, options Options, objs ...client.Object) (*countingHelm, *infrastructurev1alpha1.VCluster) {
+	t.Helper()
 	h := &countingHelm{}
 	c := fakeclient.NewClientBuilder().
 		WithScheme(testScheme(t)).
@@ -94,12 +105,19 @@ func reconcileWith(t *testing.T, options Options, objs ...client.Object) (*count
 		New:               func() GenericVCluster { return &infrastructurev1alpha1.VCluster{} },
 	}
 	// twice: the first pass only sets the Paused condition and requeues
+	var errs []error
 	for range 2 {
 		// a failed deploy returns its error for the backoff; the conditions carry it too
 		_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "ns", Name: "vc1"}})
 		if err != nil {
-			t.Log(err)
+			errs = append(errs, err)
 		}
+	}
+	switch {
+	case expectErr && len(errs) == 0:
+		t.Error("reconcile: no error, want one")
+	case !expectErr && len(errs) > 0:
+		t.Errorf("reconcile: %v", errs)
 	}
 	got := &infrastructurev1alpha1.VCluster{}
 	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "vc1"}, got); err != nil {
@@ -351,7 +369,7 @@ func TestHelmInstallerLogsNoValues(t *testing.T) {
 
 func TestRequireChartVersion(t *testing.T) {
 	cluster := &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "ns"}}
-	h, got := reconcileWith(t, Options{RequireChartVersion: true}, cluster, ownedVCluster())
+	h, got := reconcileExpectErr(t, Options{RequireChartVersion: true}, cluster, ownedVCluster())
 	if h.upgrades != 0 {
 		t.Errorf("helm upgrades without a chart version: %d", h.upgrades)
 	}
@@ -413,10 +431,28 @@ func newFluxEnv(t *testing.T, objs ...client.Object) *fluxEnv {
 
 func (e *fluxEnv) reconcile(times int) *infrastructurev1alpha1.VCluster {
 	e.t.Helper()
+	return e.reconcileErr(times, false)
+}
+
+// reconcileExpectErr is reconcile for a pass that fails: at least one Reconcile returns an error.
+func (e *fluxEnv) reconcileExpectErr(times int) *infrastructurev1alpha1.VCluster {
+	e.t.Helper()
+	return e.reconcileErr(times, true)
+}
+
+func (e *fluxEnv) reconcileErr(times int, expectErr bool) *infrastructurev1alpha1.VCluster {
+	e.t.Helper()
+	var errs []error
 	for range times {
 		if _, err := e.r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "ns", Name: "vc1"}}); err != nil {
-			e.t.Log(err)
+			errs = append(errs, err)
 		}
+	}
+	switch {
+	case expectErr && len(errs) == 0:
+		e.t.Error("reconcile: no error, want one")
+	case !expectErr && len(errs) > 0:
+		e.t.Errorf("reconcile: %v", errs)
 	}
 	got := &infrastructurev1alpha1.VCluster{}
 	if err := e.c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "vc1"}, got); err != nil && !kerrors.IsNotFound(err) {
@@ -499,7 +535,7 @@ func TestFluxInstallerStalled(t *testing.T) {
 	e := newFluxEnv(t, &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "ns"}}, fluxVCluster())
 	e.reconcile(2)
 	e.setHelmReleaseStatus("Stalled", "True")
-	got := e.reconcile(1)
+	got := e.reconcileExpectErr(1)
 	if c := conditions.Get(got, infrastructurev1alpha1.HelmChartDeployedCondition); c == nil || c.Reason != infrastructurev1alpha1.HelmDeployFailedReason {
 		t.Errorf("HelmChartDeployed after Stalled: %+v", c)
 	}
@@ -542,18 +578,40 @@ func TestFluxInstallerDelete(t *testing.T) {
 	if err := e.r.fluxSuspend(context.Background(), fluxVCluster(), true); err != nil {
 		t.Fatal(err)
 	}
+	if s, _, _ := unstructured.NestedBool(e.helmRelease().Object, "spec", "suspend"); !s {
+		t.Fatal("HelmRelease not suspended before the delete")
+	}
 
 	vc := &infrastructurev1alpha1.VCluster{}
 	if err := e.c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "vc1"}, vc); err != nil {
+		t.Fatal(err)
+	}
+	// helm-controller's finalizer: the HelmRelease stays until it has uninstalled the chart
+	hr := e.helmRelease()
+	hr.SetFinalizers([]string{"finalizers.fluxcd.io"})
+	if err := e.c.Update(context.Background(), hr); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.c.Delete(context.Background(), vc); err != nil {
 		t.Fatal(err)
 	}
 	e.reconcile(1)
-	hr := newUnstructured(helmReleaseGVK, "ns", "vc1")
-	if err := e.c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "vc1"}, hr); !kerrors.IsNotFound(err) {
-		t.Fatalf("HelmRelease after delete: %v", err)
+	hr = e.helmRelease()
+	if s, _, _ := unstructured.NestedBool(hr.Object, "spec", "suspend"); s {
+		t.Errorf("HelmRelease deleted while suspended: helm-controller would skip the uninstall")
+	}
+	if hr.GetDeletionTimestamp() == nil {
+		t.Errorf("HelmRelease not deleted")
+	}
+	e.reconcile(1)
+	if err := e.c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "vc1"}, vc); err != nil {
+		t.Errorf("VCluster gone before the chart: %v", err)
+	}
+
+	// helm-controller uninstalled the chart
+	hr.SetFinalizers(nil)
+	if err := e.c.Update(context.Background(), hr); err != nil {
+		t.Fatal(err)
 	}
 	e.reconcile(1)
 	if err := e.c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "vc1"}, vc); !kerrors.IsNotFound(err) {
@@ -657,7 +715,7 @@ func sorted(s []string) []string {
 func TestPostRenderersNeedFlux(t *testing.T) {
 	vc := fluxVCluster()
 	vc.Spec.HelmRelease.Installer = infrastructurev1alpha1.HelmInstaller
-	h, got := reconcileOnce(t, &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "ns"}}, vc)
+	h, got := reconcileExpectErr(t, Options{}, &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "ns"}}, vc)
 	if h.upgrades != 0 {
 		t.Errorf("helm ran with postRenderers")
 	}

@@ -90,6 +90,15 @@ spec:
                         description: the version of the helm chart to use
                         type: string
                     type: object
+                  driftDetection:
+                    description: |-
+                      DriftDetection is the Flux HelmRelease's spec.driftDetection.mode (flux installer only;
+                      the helm installer detects no drift). Empty: the provider's --flux-drift-detection.
+                    enum:
+                    - enabled
+                    - warn
+                    - disabled
+                    type: string
                   installer:
                     description: |-
                       Installer installs the chart: helm (the provider runs helm) or flux (the provider writes a

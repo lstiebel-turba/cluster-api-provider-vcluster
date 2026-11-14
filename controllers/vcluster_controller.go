@@ -391,6 +391,8 @@ func (r *GenericReconciler) chartSpec(vCluster GenericVCluster) (chartSpec, erro
 		chart.values = hr.Values
 	}
 
+	chart.driftDetection = hr.DriftDetection
+
 	for _, raw := range hr.PostRenderers {
 		var postRenderer any
 		if err := json.Unmarshal(raw.Raw, &postRenderer); err != nil {

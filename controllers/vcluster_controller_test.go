@@ -564,3 +564,26 @@ func TestFluxInstallerCopiesLabelsAndReconcileRequests(t *testing.T) {
 		t.Errorf("requestedAt after the second request: %q", got)
 	}
 }
+
+func TestFluxDriftDetectionPerVCluster(t *testing.T) {
+	vc := fluxVCluster()
+	vc.Spec.HelmRelease.DriftDetection = "warn"
+	e := newFluxEnv(t, &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "ns"}}, vc)
+	e.reconcile(2)
+	if mode, _, _ := unstructured.NestedString(e.helmRelease().Object, "spec", "driftDetection", "mode"); mode != "warn" {
+		t.Errorf("driftDetection.mode %q, want the VCluster's warn over the provider's enabled", mode)
+	}
+
+	// the owner turns it on for a force sync
+	if err := e.c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "vc1"}, vc); err != nil {
+		t.Fatal(err)
+	}
+	vc.Spec.HelmRelease.DriftDetection = "enabled"
+	if err := e.c.Update(context.Background(), vc); err != nil {
+		t.Fatal(err)
+	}
+	e.reconcile(1)
+	if mode, _, _ := unstructured.NestedString(e.helmRelease().Object, "spec", "driftDetection", "mode"); mode != "enabled" {
+		t.Errorf("driftDetection.mode %q after the change, want enabled", mode)
+	}
+}

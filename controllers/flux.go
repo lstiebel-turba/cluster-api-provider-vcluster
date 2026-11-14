@@ -50,6 +50,7 @@ type chartSpec struct {
 	repo, name, version string
 	values              string // YAML or JSON
 	postRenderers       []any
+	driftDetection      string // the HelmRelease's driftDetection.mode, "" the provider's
 }
 
 // fluxState is the HelmRelease as the flux installer reads it.
@@ -150,7 +151,11 @@ func (r *GenericReconciler) fluxDeploy(ctx context.Context, vCluster GenericVClu
 			"values":      values,
 			"suspend":     false,
 		}
-		if mode := r.Options.Flux.DriftDetection; mode != "" {
+		mode := r.Options.Flux.DriftDetection
+		if chart.driftDetection != "" {
+			mode = chart.driftDetection
+		}
+		if mode != "" {
 			spec["driftDetection"] = map[string]any{"mode": mode}
 		}
 		if len(chart.postRenderers) > 0 {

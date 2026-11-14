@@ -122,6 +122,12 @@ type VirtualClusterHelmRelease struct {
 	// +kubebuilder:validation:Enum=helm;flux
 	Installer Installer `json:"installer,omitempty"`
 
+	// DriftDetection is the Flux HelmRelease's spec.driftDetection.mode (flux installer only;
+	// the helm installer detects no drift). Empty: the provider's --flux-drift-detection.
+	// +optional
+	// +kubebuilder:validation:Enum=enabled;warn;disabled
+	DriftDetection string `json:"driftDetection,omitempty"`
+
 	// PostRenderers are the Flux HelmRelease's spec.postRenderers (flux installer only).
 	// +optional
 	// +kubebuilder:validation:MaxItems=16

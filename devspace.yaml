@@ -17,7 +17,7 @@ images:
 
 deployments:
   provider:
-    namespace: capv-system
+    namespace: capvc-system
     updateImageTags: true
     kubectl:
       kustomize: true
@@ -26,7 +26,7 @@ deployments:
       - config/crd/
 dev:
   provider:
-    namespace: capv-system
+    namespace: capvc-system
     imageSelector: ${IMAGE}
     workingDir: /workspace
     terminal:
@@ -51,9 +51,9 @@ dev:
 
 commands:
   dev: |-
-    devspace run-pipeline dev -n capv-system $@
+    devspace run-pipeline dev -n capvc-system $@
   deploy: |-
-    devspace run-pipeline --profile deploy -n capv-system -d $@
+    devspace run-pipeline --profile deploy -n capvc-system -d $@
 
 profiles:
   - name: deploy

@@ -186,5 +186,5 @@ deploy-via-local-registry: docker-build # Pushes the locally build image into th
 	  # Kill the port-forward process
 	  kill $$PORT_FORWARD_PID || true
 	# Delete the existing controller
-	kubectl delete po -l control-plane=cluster-api-provider-vcluster-controller-manager -n cluster-api-provider-vcluster-system --ignore-not-found
+	kubectl delete po -l control-plane=capvc-controller-manager -n capvc-system --ignore-not-found
 	$(KUSTOMIZE) build config/dev | kubectl apply -f -

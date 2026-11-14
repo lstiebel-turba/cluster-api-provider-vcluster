@@ -113,7 +113,7 @@ diagnostics() {
   kubectl get helmreleases.helm.toolkit.fluxcd.io,helmrepositories.source.toolkit.fluxcd.io,helmcharts.source.toolkit.fluxcd.io -A -o yaml >"$dir/flux.yaml" 2>&1 || true
   kubectl get pods,pvc,svc,deploy,sts -A -o wide >"$dir/workloads.txt" 2>&1 || true
   kubectl get events -A --sort-by=.lastTimestamp >"$dir/events.txt" 2>&1 || true
-  kubectl logs -n capv-system deploy/capv-controller-manager --tail=-1 >"$dir/provider.log" 2>&1 || true
+  kubectl logs -n capvc-system deploy/capvc-controller-manager --tail=-1 >"$dir/provider.log" 2>&1 || true
   kubectl logs -n capi-system deploy/capi-controller-manager --tail=2000 >"$dir/capi.log" 2>&1 || true
   if [[ "$INSTALLER" == flux ]]; then
     kubectl logs -n flux-system deploy/helm-controller --tail=2000 >"$dir/helm-controller.log" 2>&1 || true
@@ -219,8 +219,8 @@ setup_provider() {
   fi
   log "provider (config/default via test/e2e/kind/provider)"
   kubectl kustomize "$ROOT/test/e2e/kind/provider" | kubectl apply --server-side -f - >/dev/null
-  kubectl -n capv-system rollout restart deployment/capv-controller-manager >/dev/null
-  kubectl -n capv-system rollout status deployment/capv-controller-manager --timeout=180s >/dev/null
+  kubectl -n capvc-system rollout restart deployment/capvc-controller-manager >/dev/null
+  kubectl -n capvc-system rollout status deployment/capvc-controller-manager --timeout=180s >/dev/null
 }
 
 # --- vCluster helpers ---------------------------------------------------------------------------

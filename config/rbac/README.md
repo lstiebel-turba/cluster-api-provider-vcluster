@@ -1,12 +1,12 @@
 # RBAC
 
-The provider runs as ServiceAccount `capv-controller-manager` in `capv-system`. No binding to
+The provider runs as ServiceAccount `capvc-controller-manager` in `capvc-system`. No binding to
 `cluster-admin`; `test/rbac` checks that and the rules below.
 
 | Manifest | Bound | For |
 | --- | --- | --- |
 | `role.yaml` (`manager-role`) | ClusterRoleBinding | The provider's own API calls, generated from the `+kubebuilder:rbac` markers in `controllers/` by `make manifests`. Enough for the flux installer. |
-| `leader_election_role.yaml` | RoleBinding in `capv-system` | `--leader-elect`: the Lease and its events. |
+| `leader_election_role.yaml` | RoleBinding in `capvc-system` | `--leader-elect`: the Lease and its events. |
 | `helm-installer/` (component) | ClusterRoleBinding | The helm installer: helm runs with the provider's ServiceAccount. |
 | `namespaced/` (component) | ClusterRoleBinding plus your RoleBindings | `manager-role` split into a cluster-wide and a per-namespace part. |
 
@@ -55,16 +55,16 @@ An infrastructure cluster of another kind (not a VCluster) needs a rule of its o
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: capv-manager
+  name: capvc-manager
   namespace: tenant-a
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: capv-manager-namespace-role
+  name: capvc-manager-namespace-role
 subjects:
 - kind: ServiceAccount
-  name: capv-controller-manager
-  namespace: capv-system
+  name: capvc-controller-manager
+  namespace: capvc-system
 ```
 
 helm-controller installs the chart with its own ServiceAccount; the provider holds no right on the

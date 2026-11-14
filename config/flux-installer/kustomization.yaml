@@ -1,7 +1,7 @@
 # The provider with the flux installer as default (--installer=flux) and no chart rights: no
 # helm-installer component. Per-namespace rights: config/flux-installer/namespaced.
-namespace: capv-system
-namePrefix: capv-
+namespace: capvc-system
+namePrefix: capvc-
 
 resources:
 - ../crd

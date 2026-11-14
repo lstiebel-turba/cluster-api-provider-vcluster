@@ -149,19 +149,15 @@ endef
 
 ##@ Release
 
-RELEASE_DIR ?= release
-PULL_POLICY ?= Always
+# The newest release series in metadata.yaml, as a development version.
+VERSION ?= $(shell awk '$$2 == "major:" { m = $$3 } $$1 == "minor:" { print "v" m "." $$2 ".0-dev"; exit }' metadata.yaml)
+IMAGE ?= ghcr.io/loft-sh/cluster-api-provider-vcluster:$(VERSION)
+RELEASE_DIR ?= out
 
 .PHONY: release
-release: manifests kustomize ## Builds the manifests to publish with a release.
-	sed -i.bak -e 's@image: .*@image: '"${IMG}"'@' ./config/default/manager_image_patch.yaml && rm ./config/default/manager_image_patch.yaml.bak
-	sed -i.bak -e 's@imagePullPolicy: IfNotPresent@imagePullPolicy: '"$(PULL_POLICY)"'@' ./config/default/manager_pull_policy_patch.yaml && rm ./config/default/manager_pull_policy_patch.yaml.bak
-	mkdir -p $(RELEASE_DIR)/
-	$(KUSTOMIZE) build config/default > $(RELEASE_DIR)/infrastructure-components.yaml
-	cp templates/cluster-template* $(RELEASE_DIR)/
-	cp metadata.yaml $(RELEASE_DIR)/metadata.yaml
-	sed -i.bak -e 's@image: .*@image: ghcr.io/loft-sh/cluster-api-provider-vcluster:main@' ./config/default/manager_image_patch.yaml && rm ./config/default/manager_image_patch.yaml.bak
-	sed -i.bak -e 's@imagePullPolicy: '"$(PULL_POLICY)"'@imagePullPolicy: IfNotPresent@' ./config/default/manager_pull_policy_patch.yaml && rm ./config/default/manager_pull_policy_patch.yaml.bak
+release: manifests kustomize ## Writes the release assets to RELEASE_DIR (out/): VERSION=v0.4.0-turba.1 IMAGE=<repo>:<tag>[@sha256:<digest>].
+	VERSION="$(VERSION)" IMAGE="$(IMAGE)" RELEASE_DIR="$(RELEASE_DIR)" KUSTOMIZE="$(KUSTOMIZE)" hack/release.sh
+	RELEASE_DIR="$(abspath $(RELEASE_DIR))" go test ./test/release/...
 
 # Make sure to use the right remote TARGETARCH via make deploy-via-local-registry TARGETARCH=amd64
 .PHONY: deploy-via-local-registry

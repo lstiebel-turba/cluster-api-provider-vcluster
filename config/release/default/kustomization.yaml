@@ -1,0 +1,11 @@
+# infrastructure-components.yaml: config/default (helm installer) with the manager flags as
+# clusterctl variables (${VAR:=default}; clusterctl and the CAPI Operator substitute them).
+# hack/release.sh pins the image. Not for kubectl apply: the variables stay unsubstituted.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- ../../default
+
+components:
+- ../variables

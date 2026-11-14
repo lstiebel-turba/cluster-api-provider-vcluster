@@ -33,12 +33,19 @@ esac
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Pinned versions
+# renovate: datasource=docker depName=kindest/node
 KIND_NODE_IMAGE="kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0" # kind v0.33.0
+# renovate: datasource=github-releases depName=cert-manager/cert-manager
 CERT_MANAGER_VERSION="v1.20.5"
+# renovate: datasource=github-releases depName=kubernetes-sigs/cluster-api
 CAPI_VERSION="v1.13.8"
+# renovate: datasource=github-releases depName=fluxcd/source-controller
 SOURCE_CONTROLLER_VERSION="v1.9.6"
+# renovate: datasource=github-releases depName=fluxcd/helm-controller
 HELM_CONTROLLER_VERSION="v1.6.5"
+# renovate: datasource=github-releases depName=prometheus-operator/prometheus-operator
 PROMETHEUS_OPERATOR_VERSION="v0.95.2" # ServiceMonitor CRD only
+# renovate: datasource=helm depName=vcluster registryUrl=https://charts.loft.sh
 VCLUSTER_CHART_VERSION="0.37.6"
 VCLUSTER_CHART_REPO="https://charts.loft.sh"
 

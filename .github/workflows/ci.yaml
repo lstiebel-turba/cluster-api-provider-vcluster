@@ -18,8 +18,12 @@ concurrency:
 
 env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/cluster-api-provider-vcluster
+  # renovate: datasource=go depName=golang.org/x/vuln
   GOVULNCHECK_VERSION: v1.9.0
   ENVTEST_K8S_VERSION: 1.35.x
+  # setup-envtest from the head of controller-runtime's release branch (CAPI 1.13's 0.23), by commit
+  # renovate: datasource=git-refs depName=setup-envtest packageName=https://github.com/kubernetes-sigs/controller-runtime currentValue=release-0.23
+  SETUP_ENVTEST_VERSION: f9589b9f2b9dddf8532b432bb8315f2820ab9971
 
 jobs:
   checks:
@@ -51,7 +55,7 @@ jobs:
           go run "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}" ./...
       - name: tests (unit and envtest)
         run: |
-          KUBEBUILDER_ASSETS="$(go run sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.23 use "$ENVTEST_K8S_VERSION" -p path)"
+          KUBEBUILDER_ASSETS="$(go run sigs.k8s.io/controller-runtime/tools/setup-envtest@"$SETUP_ENVTEST_VERSION" use "$ENVTEST_K8S_VERSION" -p path)"
           export KUBEBUILDER_ASSETS
           go test -race ./...
 
@@ -85,6 +89,8 @@ jobs:
             out="type=cacheonly"
           fi
           docker buildx build --platform "linux/$ARCH" --output "$out" \
+            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
             --metadata-file "$RUNNER_TEMP/meta.json" .
           if [[ "$PUSH" == true ]]; then
             jq -r '."containerimage.digest"' "$RUNNER_TEMP/meta.json" >"$RUNNER_TEMP/digests/$ARCH"

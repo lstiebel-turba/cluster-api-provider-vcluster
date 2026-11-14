@@ -1,0 +1,177 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Weekly dependency PRs for the fork, run by the hosted Renovate app (docs/fork.md, 'Dependency updates'). Validate after editing: npx --package renovate@44 -- renovate-config-validator renovate.json",
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests"
+  ],
+  "enabledManagers": [
+    "gomod",
+    "github-actions",
+    "dockerfile",
+    "custom.regex"
+  ],
+  "dependencyDashboard": {
+    "enabled": false
+  },
+  "schedule": [
+    "before 6am on monday"
+  ],
+  "minimumReleaseAge": "3 days",
+  "separateMajorMinor": false,
+  "prConcurrentLimit": 0,
+  "prHourlyLimit": 0,
+  "labels": [
+    "dependencies"
+  ],
+  "postUpdateOptions": [
+    "gomodTidy"
+  ],
+  "dockerfile": {
+    "pinDigests": true
+  },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "`# renovate: datasource=… depName=… [registryUrl=…] [extractVersion=…]` directly above `KEY=version`, `ARG KEY=version`, `KEY=\"version\"`, `KEY: version` or an image `KEY=\"name:tag@sha256:…\"`; or `# renovate: datasource=git-refs depName=… packageName=<git url> currentValue=<branch>` above `KEY: <commit>`, which follows the branch head",
+      "managerFilePatterns": [
+        "/^hack/e2e-kwok\\.env$/",
+        "/^hack/e2e-kind\\.sh$/",
+        "/^Dockerfile$/",
+        "/^\\.github/workflows/[^/]+\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>(?!git-refs)\\S+) depName=(?<depName>\\S+)(?: registryUrl=(?<registryUrl>\\S+))?(?: extractVersion=(?<extractVersion>\\S+))?[^\\n]*\\n\\s*(?:ARG )?[A-Z0-9_]+(?:=|: )\"?(?:[a-z0-9./-]+:)?(?<currentValue>[^\\s\"@]+)(?:@(?<currentDigest>sha256:[0-9a-f]{64}))?",
+        "# renovate: datasource=(?<datasource>git-refs) depName=(?<depName>\\S+) packageName=(?<packageName>\\S+) currentValue=(?<currentValue>\\S+)\\n\\s*[A-Z0-9_]+(?:=|: )(?<currentDigest>[0-9a-f]{40})"
+      ]
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Everything not named below: one PR",
+      "matchPackageNames": [
+        "*"
+      ],
+      "groupName": "tools and images",
+      "groupSlug": "tools",
+      "prBodyNotes": [
+        "A version with a sha256 pin next to it (Helm in the Dockerfile, kind in e2e-kind.yaml, kwokctl, the Flux controllers and CAPI in hack/e2e-kwok.env) needs its checksums too: run `hack/update-checksums.sh` on this branch and commit the result."
+      ]
+    },
+    {
+      "description": "Go modules other than Kubernetes and Cluster API: one PR. Renovate runs go mod tidy and, since vendor/modules.txt exists, go mod vendor.",
+      "matchManagers": [
+        "gomod"
+      ],
+      "groupName": "go modules",
+      "groupSlug": "go-modules"
+    },
+    {
+      "description": "Kubernetes and Cluster API: the k8s.io and sigs.k8s.io modules and the CAPI pins of the e2e scripts move together.",
+      "matchPackageNames": [
+        "k8s.io/**",
+        "sigs.k8s.io/**",
+        "kubernetes-sigs/cluster-api",
+        "kubernetes/kubernetes"
+      ],
+      "groupName": "kubernetes and cluster-api",
+      "groupSlug": "kubernetes",
+      "prBodyNotes": [
+        "CAPI_VERSION in hack/e2e-kwok.env has a source checksum: run `hack/update-checksums.sh` on this branch and commit the result."
+      ]
+    },
+    {
+      "description": "Cluster API minors follow the host's CAPI_VERSION (my-turba-env turbacharger/versions.env), by hand: raise this bound with the k8s.io and controller-runtime bounds below. No dependency dashboard (we use no issues), so a bound is the manual approval.",
+      "matchPackageNames": [
+        "sigs.k8s.io/cluster-api",
+        "sigs.k8s.io/cluster-api/**",
+        "kubernetes-sigs/cluster-api"
+      ],
+      "allowedVersions": "<1.14.0"
+    },
+    {
+      "description": "controller-runtime 0.23 and k8s.io 0.35 are what CAPI 1.13 is built on: patches only, minors with a CAPI minor.",
+      "matchPackageNames": [
+        "sigs.k8s.io/controller-runtime"
+      ],
+      "allowedVersions": "<0.24.0"
+    },
+    {
+      "matchPackageNames": [
+        "k8s.io/**"
+      ],
+      "allowedVersions": "<0.36.0"
+    },
+    {
+      "description": "kind's node image (hack/e2e-kind.sh) stays on the k8s.io modules' minor (1.35, envtest's in ci.yaml): patches only.",
+      "matchPackageNames": [
+        "kindest/node"
+      ],
+      "allowedVersions": "<1.36.0"
+    },
+    {
+      "description": "KWOK_KUBE_VERSION: patches only; a minor by hand.",
+      "matchPackageNames": [
+        "kubernetes/kubernetes"
+      ],
+      "allowedVersions": "<1.38.0"
+    },
+    {
+      "description": "The Go toolchain: go.mod's toolchain line and the Dockerfile's golang tag together, patches only; a Go minor (and go.mod's go line) by hand.",
+      "matchPackageNames": [
+        "go",
+        "/(^|\\/)golang$/"
+      ],
+      "groupName": "go toolchain",
+      "groupSlug": "go-toolchain"
+    },
+    {
+      "matchPackageNames": [
+        "go",
+        "/(^|\\/)golang$/"
+      ],
+      "matchUpdateTypes": [
+        "major",
+        "minor"
+      ],
+      "enabled": false
+    },
+    {
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchDepTypes": [
+        "golang"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "Helm in the image stays on 3: the helm installer drives its CLI; Helm 4 by hand.",
+      "matchPackageNames": [
+        "helm/helm"
+      ],
+      "allowedVersions": "<4.0.0"
+    },
+    {
+      "description": "The workflows' actions, pinned by SHA with the release in a comment: one PR.",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "groupName": "github actions",
+      "groupSlug": "github-actions"
+    },
+    {
+      "description": "The e2e Flux controllers and vCluster chart follow the host's (my-turba-env turbacharger/versions.env): merge once the host runs the same release.",
+      "matchPackageNames": [
+        "fluxcd/helm-controller",
+        "fluxcd/source-controller",
+        "vcluster"
+      ],
+      "groupName": "flux and vcluster (follow the host)",
+      "groupSlug": "host-aligned",
+      "prBodyNotes": [
+        "Merge once the host's turbacharger/versions.env has the same release. The Flux controllers have checksums in hack/e2e-kwok.env: run `hack/update-checksums.sh` on this branch and commit the result."
+      ]
+    }
+  ]
+}

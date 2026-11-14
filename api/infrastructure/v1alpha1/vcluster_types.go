@@ -86,6 +86,12 @@ type VClusterStatus struct {
 	// is externally managed.
 	// +optional
 	ExternalManagedControlPlane *bool `json:"externalManagedControlPlane,omitempty"`
+
+	// DeployedChartHash is the sha256 of the chart (repo, name, version) and values the helm
+	// installer last installed or upgraded: it upgrades again only when they change.
+	// +optional
+	// +kubebuilder:validation:MaxLength=64
+	DeployedChartHash string `json:"deployedChartHash,omitempty"`
 }
 
 // VClusterInitializationStatus holds the Cluster API v1beta2 contract's initialization fields.

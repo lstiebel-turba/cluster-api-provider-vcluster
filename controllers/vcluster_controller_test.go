@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -15,6 +16,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
+	kubefake "k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/rest"
 	"k8s.io/utils/ptr"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	"sigs.k8s.io/cluster-api/util/conditions"
@@ -193,6 +197,118 @@ func TestNamespaceSelector(t *testing.T) {
 	h, _ = reconcileWith(t, Options{NamespaceSelector: labels.SelectorFromSet(labels.Set{"tenant": "yes"})}, cluster, ownedVCluster())
 	if h.upgrades != 1 {
 		t.Errorf("helm upgrades in a selected namespace: %d, want 1", h.upgrades)
+	}
+}
+
+// a vCluster that comes up: its kubeconfig and certs Secrets, its Service, its API server
+func vClusterUp() []client.Object {
+	kubeconfig := `apiVersion: v1
+kind: Config
+clusters: [{name: c, cluster: {server: "https://localhost:8443"}}]
+users: [{name: u, user: {client-certificate-data: Y2VydA==, client-key-data: a2V5}}]
+contexts: [{name: c, context: {cluster: c, user: u}}]
+current-context: c
+`
+	return []client.Object{
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "vc-vc1", Namespace: "ns"}, Data: map[string][]byte{"config": []byte(kubeconfig)}},
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "vc1-certs", Namespace: "ns"}, Data: map[string][]byte{"ca.crt": []byte("ca"), "ca.key": []byte("key")}},
+		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "vc1", Namespace: "ns"}, Spec: corev1.ServiceSpec{ClusterIP: "10.0.0.1"}},
+	}
+}
+
+type fakeClientConfigGetter struct{}
+
+func (fakeClientConfigGetter) NewForConfig(*rest.Config) (kubernetes.Interface, error) {
+	return kubefake.NewClientset(&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "default"}}), nil
+}
+
+// One create, one helm revision: writing spec.controlPlaneEndpoint after the install bumps the
+// generation, but the chart and its values are the same; a change of the values upgrades.
+func TestHelmInstallerUpgradesOnlyOnChartChange(t *testing.T) {
+	ctx := context.Background()
+	key := types.NamespacedName{Namespace: "ns", Name: "vc1"}
+	vc := ownedVCluster()
+	vc.Generation = 1
+	vc.Spec.HelmRelease = &infrastructurev1alpha1.VirtualClusterHelmRelease{Values: "a: 1"}
+	h := &countingHelm{}
+	c := fakeclient.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithObjects(append(vClusterUp(), vc, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "ns"}},
+			&clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "ns"}})...).
+		WithStatusSubresource(&infrastructurev1alpha1.VCluster{}).
+		Build()
+	r := &GenericReconciler{
+		Client:             c,
+		HelmClient:         h,
+		Log:                logr.Discard(),
+		Scheme:             c.Scheme(),
+		clusterKindExists:  true,
+		ClientConfigGetter: fakeClientConfigGetter{},
+		HTTPClientGetter:   NewHTTPClientGetter(),
+		New:                func() GenericVCluster { return &infrastructurev1alpha1.VCluster{} },
+	}
+	// reconcile as the API server would: a spec change bumps the generation (the fake client
+	// does not)
+	reconcile := func(times int) *infrastructurev1alpha1.VCluster {
+		t.Helper()
+		got := &infrastructurev1alpha1.VCluster{}
+		for range times {
+			before := &infrastructurev1alpha1.VCluster{}
+			if err := c.Get(ctx, key, before); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+				t.Log(err)
+			}
+			if err := c.Get(ctx, key, got); err != nil {
+				t.Fatal(err)
+			}
+			if !equality.Semantic.DeepEqual(before.Spec, got.Spec) {
+				got.Generation++
+				if err := c.Update(ctx, got); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		return got
+	}
+
+	got := reconcile(5)
+	if got.Spec.ControlPlaneEndpoint == nil || got.Spec.ControlPlaneEndpoint.Host != "10.0.0.1" {
+		t.Fatalf("controlPlaneEndpoint not written: %+v", got.Spec.ControlPlaneEndpoint)
+	}
+	if got.Generation < 2 {
+		t.Fatalf("generation %d: the endpoint did not bump it", got.Generation)
+	}
+	if h.upgrades != 1 {
+		t.Errorf("helm revisions after a create: %d, want 1", h.upgrades)
+	}
+	if got.Status.DeployedChartHash == "" {
+		t.Errorf("no deployedChartHash")
+	}
+
+	got.Spec.HelmRelease.Values = "a: 2"
+	got.Generation++
+	if err := c.Update(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+	reconcile(3)
+	if h.upgrades != 2 {
+		t.Errorf("helm revisions after a values change: %d, want 2", h.upgrades)
+	}
+}
+
+// A VCluster a provider without the hash deployed: no upgrade for the new status field.
+func TestHelmInstallerAdoptsDeployedChart(t *testing.T) {
+	vc := ownedVCluster()
+	vc.Generation, vc.Status.ObservedGeneration = 3, 3
+	markTrue(vc, infrastructurev1alpha1.HelmChartDeployedCondition)
+	h, got := reconcileOnce(t, &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "ns"}}, vc)
+	if h.upgrades != 0 {
+		t.Errorf("helm upgrades of a deployed VCluster: %d, want 0", h.upgrades)
+	}
+	if got.Status.DeployedChartHash == "" {
+		t.Errorf("no deployedChartHash")
 	}
 }
 

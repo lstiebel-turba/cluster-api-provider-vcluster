@@ -18,6 +18,8 @@ package controllers
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -406,6 +408,16 @@ func (r *GenericReconciler) chartSpec(vCluster GenericVCluster) (chartSpec, erro
 	return chart, nil
 }
 
+// hash identifies what the helm installer installs: the chart and its values.
+func (c chartSpec) hash() string {
+	return sha256Hex(strings.Join([]string{c.repo, c.name, c.version, c.values}, "\x00"))
+}
+
+func sha256Hex(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
 func (r *GenericReconciler) redeployIfNeeded(ctx context.Context, vCluster GenericVCluster) error {
 	chart, err := r.chartSpec(vCluster)
 	if err != nil {
@@ -436,33 +448,34 @@ func (r *GenericReconciler) redeployIfNeeded(ctx context.Context, vCluster Gener
 		return nil
 	}
 
-	if vCluster.GetGeneration() == vCluster.GetStatus().ObservedGeneration &&
-		conditions.IsTrue(vCluster, infrastructurev1alpha1.HelmChartDeployedCondition) {
+	hash := chart.hash()
+	deployed := conditions.IsTrue(vCluster, infrastructurev1alpha1.HelmChartDeployedCondition)
+	if deployed && vCluster.GetStatus().DeployedChartHash == "" &&
+		vCluster.GetGeneration() == vCluster.GetStatus().ObservedGeneration {
+		// deployed by a provider without the hash: take the current spec as deployed
+		vCluster.GetStatus().DeployedChartHash = hash
+	}
+	// only a change of the chart or the values upgrades (not spec.controlPlaneEndpoint, which
+	// the provider writes itself after the install)
+	if deployed && vCluster.GetStatus().DeployedChartHash == hash {
 		return nil
 	}
 
 	logger := r.Log
 	chartRepo, chartName, chartVersion, values := chart.repo, chart.name, chart.version, chart.values
 
-	if !conditions.IsTrue(vCluster, infrastructurev1alpha1.HelmChartDeployedCondition) {
-		logger.Info("deploying vcluster",
-			"namespace", vCluster.GetNamespace(),
-			"clusterName", vCluster.GetName(),
-			"chartRepo", chartRepo,
-			"chartName", chartName,
-			"chartVersion", chartVersion,
-			"values", values,
-		)
-	} else {
-		logger.Info("upgrading vcluster",
-			"namespace", vCluster.GetNamespace(),
-			"clusterName", vCluster.GetName(),
-			"chartRepo", chartRepo,
-			"chartName", chartName,
-			"chartVersion", chartVersion,
-			"values", values,
-		)
+	action := "deploying vcluster"
+	if deployed {
+		action = "upgrading vcluster"
 	}
+	logger.Info(action,
+		"namespace", vCluster.GetNamespace(),
+		"clusterName", vCluster.GetName(),
+		"chartRepo", chartRepo,
+		"chartName", chartName,
+		"chartVersion", chartVersion,
+		"values", values,
+	)
 
 	var chartPath string
 	if chartVersion != "" {
@@ -497,6 +510,7 @@ func (r *GenericReconciler) redeployIfNeeded(ctx context.Context, vCluster Gener
 
 	markTrue(vCluster, infrastructurev1alpha1.HelmChartDeployedCondition)
 	conditions.Delete(vCluster, infrastructurev1alpha1.KubeconfigReadyCondition)
+	vCluster.GetStatus().DeployedChartHash = hash
 
 	return nil
 }

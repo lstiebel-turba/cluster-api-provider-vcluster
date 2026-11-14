@@ -194,6 +194,12 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              deployedChartHash:
+                description: |-
+                  DeployedChartHash is the sha256 of the chart (repo, name, version) and values the helm
+                  installer last installed or upgraded: it upgrades again only when they change.
+                maxLength: 64
+                type: string
               externalManagedControlPlane:
                 description: |-
                   ExternalManagedControlPlane is required by Cluster API to indicate that the control plane

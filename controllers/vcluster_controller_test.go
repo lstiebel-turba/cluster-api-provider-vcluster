@@ -2,13 +2,17 @@ package controllers
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
@@ -196,6 +200,221 @@ func TestRequireChartVersion(t *testing.T) {
 	h, got := reconcileWith(t, Options{RequireChartVersion: true}, cluster, ownedVCluster())
 	if h.upgrades != 0 {
 		t.Errorf("helm upgrades without a chart version: %d", h.upgrades)
+	}
+	if c := conditions.Get(got, infrastructurev1alpha1.HelmChartDeployedCondition); c == nil || c.Reason != infrastructurev1alpha1.HelmDeployFailedReason {
+		t.Errorf("HelmChartDeployed: %+v", c)
+	}
+}
+
+func fluxScheme(t *testing.T) *runtime.Scheme {
+	t.Helper()
+	scheme := testScheme(t)
+	for _, gvk := range []schema.GroupVersionKind{helmReleaseGVK, helmRepositoryGVK} {
+		scheme.AddKnownTypeWithName(gvk, &unstructured.Unstructured{})
+		list := gvk
+		list.Kind += "List"
+		scheme.AddKnownTypeWithName(list, &unstructured.UnstructuredList{})
+	}
+	return scheme
+}
+
+func fluxVCluster() *infrastructurev1alpha1.VCluster {
+	vc := ownedVCluster()
+	vc.Spec.HelmRelease = &infrastructurev1alpha1.VirtualClusterHelmRelease{
+		Installer:     infrastructurev1alpha1.FluxInstaller,
+		Chart:         infrastructurev1alpha1.VirtualClusterHelmChart{Repo: "oci://mirror.example/charts", Version: "0.37.6"},
+		Values:        "controlPlane:\n  distro:\n    k8s:\n      enabled: true\n",
+		PostRenderers: []runtime.RawExtension{{Raw: []byte(`{"kustomize":{"patches":[{"target":{"kind":"Deployment"},"patch":"[]"}]}}`)}},
+	}
+	return vc
+}
+
+type fluxEnv struct {
+	t *testing.T
+	c client.Client
+	r *GenericReconciler
+	h *countingHelm
+}
+
+func newFluxEnv(t *testing.T, objs ...client.Object) *fluxEnv {
+	t.Helper()
+	h := &countingHelm{}
+	c := fakeclient.NewClientBuilder().
+		WithScheme(fluxScheme(t)).
+		WithObjects(append(objs, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "ns"}})...).
+		WithStatusSubresource(&infrastructurev1alpha1.VCluster{}, newUnstructured(helmReleaseGVK, "", "")).
+		Build()
+	return &fluxEnv{t: t, c: c, h: h, r: &GenericReconciler{
+		Client:            c,
+		HelmClient:        h,
+		Log:               logr.Discard(),
+		Scheme:            c.Scheme(),
+		Options:           Options{Flux: FluxOptions{DriftDetection: "enabled"}},
+		clusterKindExists: true,
+		HTTPClientGetter:  NewHTTPClientGetter(),
+		New:               func() GenericVCluster { return &infrastructurev1alpha1.VCluster{} },
+	}}
+}
+
+func (e *fluxEnv) reconcile(times int) *infrastructurev1alpha1.VCluster {
+	e.t.Helper()
+	for range times {
+		if _, err := e.r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "ns", Name: "vc1"}}); err != nil {
+			e.t.Log(err)
+		}
+	}
+	got := &infrastructurev1alpha1.VCluster{}
+	if err := e.c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "vc1"}, got); err != nil && !kerrors.IsNotFound(err) {
+		e.t.Fatal(err)
+	}
+	return got
+}
+
+func (e *fluxEnv) helmRelease() *unstructured.Unstructured {
+	e.t.Helper()
+	hr := newUnstructured(helmReleaseGVK, "ns", "vc1")
+	if err := e.c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "vc1"}, hr); err != nil {
+		e.t.Fatal(err)
+	}
+	return hr
+}
+
+func (e *fluxEnv) setHelmReleaseStatus(conditionType, status string) {
+	e.t.Helper()
+	hr := e.helmRelease()
+	hr.Object["status"] = map[string]any{
+		"observedGeneration": hr.GetGeneration(),
+		"conditions":         []any{map[string]any{"type": conditionType, "status": status, "message": "from flux"}},
+	}
+	if err := e.c.Status().Update(context.Background(), hr); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+func TestFluxInstallerWritesHelmRelease(t *testing.T) {
+	e := newFluxEnv(t, &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "ns"}}, fluxVCluster())
+	got := e.reconcile(2)
+	if e.h.upgrades != 0 {
+		t.Errorf("helm ran under the flux installer: %d", e.h.upgrades)
+	}
+	if c := conditions.Get(got, infrastructurev1alpha1.HelmChartDeployedCondition); c == nil || c.Reason != infrastructurev1alpha1.HelmReleaseNotReadyReason {
+		t.Errorf("HelmChartDeployed before Flux is ready: %+v", c)
+	}
+
+	hr := e.helmRelease()
+	for path, want := range map[string]any{
+		"spec.releaseName":               "vc1",
+		"spec.chart.spec.version":        "0.37.6",
+		"spec.chart.spec.chart":          "vcluster",
+		"spec.chart.spec.sourceRef.name": "vc1",
+		"spec.driftDetection.mode":       "enabled",
+		"spec.suspend":                   false,
+	} {
+		got, _, _ := unstructured.NestedFieldNoCopy(hr.Object, strings.Split(path, ".")...)
+		if got != want {
+			t.Errorf("%s = %v, want %v", path, got, want)
+		}
+	}
+	if v, _, _ := unstructured.NestedBool(hr.Object, "spec", "values", "controlPlane", "distro", "k8s", "enabled"); !v {
+		t.Errorf("values not passed: %v", hr.Object["spec"])
+	}
+	if pr, _, _ := unstructured.NestedSlice(hr.Object, "spec", "postRenderers"); len(pr) != 1 {
+		t.Errorf("postRenderers: %v", pr)
+	}
+	if owner := metav1.GetControllerOf(hr); owner == nil || owner.Kind != "VCluster" {
+		t.Errorf("HelmRelease owner: %+v", owner)
+	}
+
+	repo := newUnstructured(helmRepositoryGVK, "ns", "vc1")
+	if err := e.c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "vc1"}, repo); err != nil {
+		t.Fatal(err)
+	}
+	if typ, _, _ := unstructured.NestedString(repo.Object, "spec", "type"); typ != "oci" {
+		t.Errorf("HelmRepository type %q, want oci", typ)
+	}
+
+	e.setHelmReleaseStatus("Ready", "True")
+	got = e.reconcile(1)
+	if !conditions.IsTrue(got, infrastructurev1alpha1.HelmChartDeployedCondition) {
+		t.Errorf("HelmChartDeployed after Ready: %+v", conditions.Get(got, infrastructurev1alpha1.HelmChartDeployedCondition))
+	}
+}
+
+func TestFluxInstallerStalled(t *testing.T) {
+	e := newFluxEnv(t, &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "ns"}}, fluxVCluster())
+	e.reconcile(2)
+	e.setHelmReleaseStatus("Stalled", "True")
+	got := e.reconcile(1)
+	if c := conditions.Get(got, infrastructurev1alpha1.HelmChartDeployedCondition); c == nil || c.Reason != infrastructurev1alpha1.HelmDeployFailedReason {
+		t.Errorf("HelmChartDeployed after Stalled: %+v", c)
+	}
+	if got.Status.Phase != infrastructurev1alpha1.VirtualClusterFailed {
+		t.Errorf("phase %q, want Failed", got.Status.Phase)
+	}
+}
+
+func TestFluxInstallerSuspendsWhilePaused(t *testing.T) {
+	cluster := &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "ns"}}
+	e := newFluxEnv(t, cluster, fluxVCluster())
+	e.reconcile(2)
+
+	if err := e.c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "c1"}, cluster); err != nil {
+		t.Fatal(err)
+	}
+	cluster.Spec.Paused = ptr.To(true)
+	if err := e.c.Update(context.Background(), cluster); err != nil {
+		t.Fatal(err)
+	}
+	e.reconcile(2)
+	if s, _, _ := unstructured.NestedBool(e.helmRelease().Object, "spec", "suspend"); !s {
+		t.Errorf("HelmRelease not suspended while paused")
+	}
+
+	cluster.Spec.Paused = ptr.To(false)
+	if err := e.c.Update(context.Background(), cluster); err != nil {
+		t.Fatal(err)
+	}
+	e.reconcile(2)
+	if s, _, _ := unstructured.NestedBool(e.helmRelease().Object, "spec", "suspend"); s {
+		t.Errorf("HelmRelease still suspended after unpause")
+	}
+}
+
+func TestFluxInstallerDelete(t *testing.T) {
+	e := newFluxEnv(t, &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "ns"}}, fluxVCluster())
+	e.reconcile(2)
+	// a suspended HelmRelease must be resumed first, or helm-controller skips the uninstall
+	if err := e.r.fluxSuspend(context.Background(), fluxVCluster(), true); err != nil {
+		t.Fatal(err)
+	}
+
+	vc := &infrastructurev1alpha1.VCluster{}
+	if err := e.c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "vc1"}, vc); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.c.Delete(context.Background(), vc); err != nil {
+		t.Fatal(err)
+	}
+	e.reconcile(1)
+	hr := newUnstructured(helmReleaseGVK, "ns", "vc1")
+	if err := e.c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "vc1"}, hr); !kerrors.IsNotFound(err) {
+		t.Fatalf("HelmRelease after delete: %v", err)
+	}
+	e.reconcile(1)
+	if err := e.c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "vc1"}, vc); !kerrors.IsNotFound(err) {
+		t.Errorf("VCluster still there: %v %v", err, vc.Finalizers)
+	}
+	if e.h.upgrades != 0 {
+		t.Errorf("helm ran")
+	}
+}
+
+func TestPostRenderersNeedFlux(t *testing.T) {
+	vc := fluxVCluster()
+	vc.Spec.HelmRelease.Installer = infrastructurev1alpha1.HelmInstaller
+	h, got := reconcileOnce(t, &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "ns"}}, vc)
+	if h.upgrades != 0 {
+		t.Errorf("helm ran with postRenderers")
 	}
 	if c := conditions.Get(got, infrastructurev1alpha1.HelmChartDeployedCondition); c == nil || c.Reason != infrastructurev1alpha1.HelmDeployFailedReason {
 		t.Errorf("HelmChartDeployed: %+v", c)

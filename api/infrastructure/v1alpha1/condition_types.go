@@ -41,6 +41,9 @@ const (
 	// SucceededReason is the reason of a condition that is true.
 	SucceededReason = "Succeeded"
 
+	// HelmReleaseNotReadyReason means Flux has not installed or upgraded the chart yet.
+	HelmReleaseNotReadyReason = "HelmReleaseNotReady"
+
 	// NotReadyReason means the vcluster is not ready yet.
 	NotReadyReason = "NotReady"
 )

@@ -21,9 +21,15 @@ type Options struct {
 
 	// RequireChartVersion refuses a VCluster without a chart version.
 	RequireChartVersion bool
+
+	// Installer is the installer of a VCluster without spec.helmRelease.installer. Empty: helm.
+	Installer infrastructurev1alpha1.Installer
+
+	// Flux configures the flux installer.
+	Flux FluxOptions
 }
 
-func RegisterControllers(ctx context.Context, mgr manager.Manager, options Options) error {
+func RegisterControllers(_ context.Context, mgr manager.Manager, options Options) error {
 	rawConfig, err := kubeconfighelper.ConvertRestConfigToRawConfig(mgr.GetConfig())
 	if err != nil {
 		return fmt.Errorf("unable to get config: %w", err)

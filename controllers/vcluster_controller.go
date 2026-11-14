@@ -117,9 +117,16 @@ func (r *GenericReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ 
 			return ctrl.Result{}, nil
 		}
 
-		err = deleteHelmChart(ctx, r.HelmClient, r.HelmSecrets, req.Namespace, req.Name, r.Log)
-		if err != nil {
-			return ctrl.Result{}, err
+		if r.installer(vCluster) == infrastructurev1alpha1.FluxInstaller {
+			gone, err := r.fluxRemove(ctx, vCluster)
+			if err != nil || !gone {
+				return ctrl.Result{RequeueAfter: 5 * time.Second}, err
+			}
+		} else {
+			err = deleteHelmChart(ctx, r.HelmClient, r.HelmSecrets, req.Namespace, req.Name, r.Log)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
 		}
 
 		// delete the persistent volume claim
@@ -131,17 +138,25 @@ func (r *GenericReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ 
 		return ctrl.Result{}, RemoveFinalizer(ctx, r.Client, vCluster, CleanupFinalizer)
 	}
 
-	if cluster != nil {
+	switch {
+	case cluster != nil:
 		isPaused, requeue, err := paused.EnsurePausedCondition(ctx, r.Client, cluster, vCluster)
+		if err == nil && isPaused && r.installer(vCluster) == infrastructurev1alpha1.FluxInstaller {
+			// paused: Flux must not undo what the owner of the pause does (scaling to zero)
+			err = r.fluxSuspend(ctx, vCluster, true)
+		}
 		if err != nil || isPaused || requeue {
 			return ctrl.Result{}, err
 		}
-	} else if r.clusterKindExists {
+	case r.clusterKindExists:
 		// as per CAPI docs:
 		// The cluster controller will set an OwnerReference on the infrastructureCluster.
 		// This controller should normally take no action during reconciliation until it sees the OwnerReference.
 		return ctrl.Result{}, nil
-	} else if annotations.HasPaused(vCluster) {
+	case annotations.HasPaused(vCluster):
+		if r.installer(vCluster) == infrastructurev1alpha1.FluxInstaller {
+			return ctrl.Result{}, r.fluxSuspend(ctx, vCluster, true)
+		}
 		return ctrl.Result{}, nil
 	}
 
@@ -174,6 +189,10 @@ func (r *GenericReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ 
 
 	// check if we have to redeploy
 	err = r.redeployIfNeeded(ctx, vCluster)
+	if err == nil && !conditions.IsTrue(vCluster, infrastructurev1alpha1.HelmChartDeployedCondition) {
+		// the flux installer: helm-controller still installing or upgrading
+		return ctrl.Result{RequeueAfter: time.Second * 5}, nil
+	}
 	if err != nil {
 		r.Log.Error(err, "error during virtual cluster deploy",
 			"namespace", vCluster.GetNamespace(),
@@ -275,53 +294,98 @@ func (r *GenericReconciler) reconcilePhase(vCluster GenericVCluster) {
 	}
 }
 
-func (r *GenericReconciler) redeployIfNeeded(_ context.Context, vCluster GenericVCluster) error {
+// installer returns the VCluster's installer: its own, else the provider's default, else helm.
+func (r *GenericReconciler) installer(vCluster GenericVCluster) infrastructurev1alpha1.Installer {
+	if hr := vCluster.GetSpec().HelmRelease; hr != nil && hr.Installer != "" {
+		return hr.Installer
+	}
+	if r.Options.Installer != "" {
+		return r.Options.Installer
+	}
+	return infrastructurev1alpha1.HelmInstaller
+}
+
+func (r *GenericReconciler) chartSpec(vCluster GenericVCluster) (chartSpec, error) {
+	hr := vCluster.GetSpec().HelmRelease
+	chart := chartSpec{repo: constants.DefaultVClusterRepo, name: constants.DefaultVClusterChartName}
+	if hr == nil {
+		hr = &infrastructurev1alpha1.VirtualClusterHelmRelease{}
+	}
+	if hr.Chart.Repo != "" {
+		chart.repo = hr.Chart.Repo
+	}
+	if hr.Chart.Name != "" {
+		chart.name = hr.Chart.Name
+	}
+	// Remove 'v' prefix if present
+	chart.version = strings.TrimPrefix(hr.Chart.Version, "v")
+	if chart.version == "" && r.Options.RequireChartVersion {
+		return chart, fmt.Errorf("spec.helmRelease.chart.version is required")
+	}
+
+	if hr.Values != "" && hr.ValuesObject != nil {
+		return chart, fmt.Errorf("both values and valuesObject cannot be set")
+	}
+	if hr.ValuesObject != nil {
+		rawValues, err := json.Marshal(hr.ValuesObject)
+		if err != nil {
+			return chart, fmt.Errorf("error marshalling valuesObject: %w", err)
+		}
+		chart.values = string(rawValues)
+	} else {
+		chart.values = hr.Values
+	}
+
+	for _, raw := range hr.PostRenderers {
+		var postRenderer any
+		if err := json.Unmarshal(raw.Raw, &postRenderer); err != nil {
+			return chart, fmt.Errorf("postRenderers: %w", err)
+		}
+		chart.postRenderers = append(chart.postRenderers, postRenderer)
+	}
+	if len(chart.postRenderers) > 0 && r.installer(vCluster) != infrastructurev1alpha1.FluxInstaller {
+		return chart, fmt.Errorf("postRenderers need the flux installer")
+	}
+	return chart, nil
+}
+
+func (r *GenericReconciler) redeployIfNeeded(ctx context.Context, vCluster GenericVCluster) error {
+	chart, err := r.chartSpec(vCluster)
+	if err != nil {
+		return err
+	}
+
+	// flux: write the HelmRelease every time, helm-controller decides whether to upgrade
+	if r.installer(vCluster) == infrastructurev1alpha1.FluxInstaller {
+		state, err := r.fluxDeploy(ctx, vCluster, chart)
+		switch {
+		case err != nil:
+			return err
+		case state.failed:
+			return fmt.Errorf("HelmRelease stalled: %s", state.message)
+		case !state.ready:
+			conditions.Set(vCluster, metav1.Condition{
+				Type:    infrastructurev1alpha1.HelmChartDeployedCondition,
+				Status:  metav1.ConditionFalse,
+				Reason:  infrastructurev1alpha1.HelmReleaseNotReadyReason,
+				Message: state.message,
+			})
+			return nil
+		}
+		if !conditions.IsTrue(vCluster, infrastructurev1alpha1.HelmChartDeployedCondition) {
+			markTrue(vCluster, infrastructurev1alpha1.HelmChartDeployedCondition)
+			conditions.Delete(vCluster, infrastructurev1alpha1.KubeconfigReadyCondition)
+		}
+		return nil
+	}
+
 	if vCluster.GetGeneration() == vCluster.GetStatus().ObservedGeneration &&
 		conditions.IsTrue(vCluster, infrastructurev1alpha1.HelmChartDeployedCondition) {
 		return nil
 	}
 
 	logger := r.Log
-
-	chartRepo := constants.DefaultVClusterRepo
-	if vCluster.GetSpec().HelmRelease != nil && vCluster.GetSpec().HelmRelease.Chart.Repo != "" {
-		chartRepo = vCluster.GetSpec().HelmRelease.Chart.Repo
-	}
-
-	chartName := constants.DefaultVClusterChartName
-	if vCluster.GetSpec().HelmRelease != nil && vCluster.GetSpec().HelmRelease.Chart.Name != "" {
-		chartName = vCluster.GetSpec().HelmRelease.Chart.Name
-	}
-
-	var chartVersion string
-	if vCluster.GetSpec().HelmRelease != nil && vCluster.GetSpec().HelmRelease.Chart.Version != "" {
-		chartVersion = vCluster.GetSpec().HelmRelease.Chart.Version
-		// Remove 'v' prefix if present
-		if len(chartVersion) > 0 && chartVersion[0] == 'v' {
-			chartVersion = chartVersion[1:]
-		}
-	}
-	if chartVersion == "" && r.Options.RequireChartVersion {
-		return fmt.Errorf("spec.helmRelease.chart.version is required")
-	}
-
-	var values string
-	if vCluster.GetSpec().HelmRelease != nil {
-		if vCluster.GetSpec().HelmRelease.Values != "" && vCluster.GetSpec().HelmRelease.ValuesObject != nil {
-			return fmt.Errorf("both values and valuesObject cannot be set")
-		}
-
-		if vCluster.GetSpec().HelmRelease.ValuesObject != nil {
-			rawValues, err := json.Marshal(vCluster.GetSpec().HelmRelease.ValuesObject)
-			if err != nil {
-				return fmt.Errorf("error marshalling valuesObject: %w", err)
-			}
-
-			values = string(rawValues)
-		} else if vCluster.GetSpec().HelmRelease.Values != "" {
-			values = vCluster.GetSpec().HelmRelease.Values
-		}
-	}
+	chartRepo, chartName, chartVersion, values := chart.repo, chart.name, chart.version, chart.values
 
 	if !conditions.IsTrue(vCluster, infrastructurev1alpha1.HelmChartDeployedCondition) {
 		logger.Info("deploying vcluster",
@@ -350,7 +414,7 @@ func (r *GenericReconciler) redeployIfNeeded(_ context.Context, vCluster Generic
 		chartPath = fmt.Sprintf("./%s-latest.tgz", chartName)
 	}
 
-	_, err := os.Stat(chartPath)
+	_, err = os.Stat(chartPath)
 	if err != nil {
 		// we have to upgrade / install the chart
 		err = r.HelmClient.Upgrade(vCluster.GetName(), vCluster.GetNamespace(), helm.UpgradeOptions{

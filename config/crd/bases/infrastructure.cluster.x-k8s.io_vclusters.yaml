@@ -90,6 +90,23 @@ spec:
                         description: the version of the helm chart to use
                         type: string
                     type: object
+                  installer:
+                    description: |-
+                      Installer installs the chart: helm (the provider runs helm) or flux (the provider writes a
+                      Flux HelmRelease, Flux's helm-controller installs it). Empty: the provider's --installer.
+                    enum:
+                    - helm
+                    - flux
+                    type: string
+                  postRenderers:
+                    description: PostRenderers are the Flux HelmRelease's spec.postRenderers
+                      (flux installer only).
+                    items:
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
+                    maxItems: 16
+                    type: array
+                    x-kubernetes-preserve-unknown-fields: true
                   values:
                     description: the values for the given chart
                     type: string
@@ -98,6 +115,10 @@ spec:
                     type: object
                     x-kubernetes-preserve-unknown-fields: true
                 type: object
+                x-kubernetes-validations:
+                - message: installer is immutable
+                  rule: '(has(self.installer) ? self.installer : ”) == (has(oldSelf.installer)
+                    ? oldSelf.installer : ”)'
             type: object
           status:
             description: VClusterStatus defines the observed state of VCluster

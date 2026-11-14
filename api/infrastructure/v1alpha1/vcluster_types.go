@@ -110,10 +110,23 @@ func (v *VCluster) SetConditions(conditions []metav1.Condition) {
 	v.Status.Conditions = conditions
 }
 
+// +kubebuilder:validation:XValidation:rule="(has(self.installer) ? self.installer : ”) == (has(oldSelf.installer) ? oldSelf.installer : ”)",message="installer is immutable"
 type VirtualClusterHelmRelease struct {
 	// infos about what chart to deploy
 	// +optional
 	Chart VirtualClusterHelmChart `json:"chart,omitempty"`
+
+	// Installer installs the chart: helm (the provider runs helm) or flux (the provider writes a
+	// Flux HelmRelease, Flux's helm-controller installs it). Empty: the provider's --installer.
+	// +optional
+	// +kubebuilder:validation:Enum=helm;flux
+	Installer Installer `json:"installer,omitempty"`
+
+	// PostRenderers are the Flux HelmRelease's spec.postRenderers (flux installer only).
+	// +optional
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:pruning:PreserveUnknownFields
+	PostRenderers []runtime.RawExtension `json:"postRenderers,omitempty"`
 
 	// the values for the given chart
 	// +optional
@@ -123,6 +136,17 @@ type VirtualClusterHelmRelease struct {
 	// +optional
 	ValuesObject *runtime.RawExtension `json:"valuesObject,omitempty"`
 }
+
+// Installer installs the vcluster chart.
+type Installer string
+
+const (
+	// HelmInstaller runs the helm CLI in the provider.
+	HelmInstaller Installer = "helm"
+
+	// FluxInstaller writes a Flux HelmRelease; Flux's helm-controller installs the chart.
+	FluxInstaller Installer = "flux"
+)
 
 type VirtualClusterHelmChart struct {
 	// the name of the helm chart

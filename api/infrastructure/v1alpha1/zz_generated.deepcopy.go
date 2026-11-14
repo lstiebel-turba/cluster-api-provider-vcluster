@@ -170,6 +170,13 @@ func (in *VirtualClusterHelmChart) DeepCopy() *VirtualClusterHelmChart {
 func (in *VirtualClusterHelmRelease) DeepCopyInto(out *VirtualClusterHelmRelease) {
 	*out = *in
 	out.Chart = in.Chart
+	if in.PostRenderers != nil {
+		in, out := &in.PostRenderers, &out.PostRenderers
+		*out = make([]runtime.RawExtension, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
 	if in.ValuesObject != nil {
 		in, out := &in.ValuesObject, &out.ValuesObject
 		*out = new(runtime.RawExtension)

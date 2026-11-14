@@ -67,6 +67,9 @@ func main() {
 	var namespace string
 	var namespaceSelector string
 	var requireChartVersion bool
+	var installer string
+	var fluxRepositoryName string
+	var fluxDriftDetection string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -75,6 +78,9 @@ func main() {
 	flag.StringVar(&namespace, "namespace", "", "The namespaces watched by the controller manager, comma-separated. Empty watches all.")
 	flag.StringVar(&namespaceSelector, "namespace-selector", "", "Label selector a VCluster's namespace must match to be reconciled, for example turba-env.dev/environment.")
 	flag.BoolVar(&requireChartVersion, "require-chart-version", false, "Refuse a VCluster without spec.helmRelease.chart.version instead of installing the latest chart.")
+	flag.StringVar(&installer, "installer", "helm", "The installer of a VCluster without spec.helmRelease.installer: helm (the helm CLI) or flux (a Flux HelmRelease).")
+	flag.StringVar(&fluxRepositoryName, "flux-repository-name", "", "flux installer: a HelmRepository shared by a namespace's VClusters. Empty: one per VCluster.")
+	flag.StringVar(&fluxDriftDetection, "flux-drift-detection", "enabled", "flux installer: the HelmRelease's driftDetection.mode (enabled, warn, disabled).")
 
 	opts := zap.Options{
 		Development: true,
@@ -92,6 +98,11 @@ func main() {
 			}
 			namespaces[ns] = cache.Config{}
 		}
+	}
+
+	if installer != string(infrastructurev1alpha1.HelmInstaller) && installer != string(infrastructurev1alpha1.FluxInstaller) {
+		setupLog.Error(nil, "--installer must be helm or flux", "installer", installer)
+		os.Exit(1)
 	}
 
 	selector, err := labels.Parse(namespaceSelector)
@@ -137,6 +148,11 @@ func main() {
 	if err := controllers.RegisterControllers(ctx, mgr, controllers.Options{
 		NamespaceSelector:   selector,
 		RequireChartVersion: requireChartVersion,
+		Installer:           infrastructurev1alpha1.Installer(installer),
+		Flux: controllers.FluxOptions{
+			RepositoryName: fluxRepositoryName,
+			DriftDetection: fluxDriftDetection,
+		},
 	}); err != nil {
 		setupLog.Error(err, "unable to register controllers")
 		os.Exit(1)

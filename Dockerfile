@@ -1,6 +1,6 @@
 # One image per architecture, built natively (CI: a runner per architecture, the manifest list
 # merged afterwards). BUILDPLATFORM builds, TARGETARCH is what runs.
-FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26.11 AS builder
 
 ARG TARGETOS=linux
 ARG TARGETARCH

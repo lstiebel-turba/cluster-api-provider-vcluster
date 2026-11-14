@@ -231,12 +231,12 @@ func clusterOwnerRef(obj metav1.Object) *metav1.OwnerReference {
 func (r *GenericReconciler) ownerCluster(ctx context.Context, vCluster GenericVCluster) (*clusterv1.Cluster, error) {
 	ref := clusterOwnerRef(vCluster)
 	if !r.clusterKindExists || ref == nil {
-		return nil, nil
+		return nil, nil //nolint:nilnil // no owner Cluster (yet) is not an error
 	}
 	cluster := &clusterv1.Cluster{}
 	err := r.Client.Get(ctx, types.NamespacedName{Namespace: vCluster.GetNamespace(), Name: ref.Name}, cluster)
 	if kerrors.IsNotFound(err) {
-		return nil, nil
+		return nil, nil //nolint:nilnil // no owner Cluster (yet) is not an error
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get owner cluster: %w", err)

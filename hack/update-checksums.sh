@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Rewrites every sha256 pin to match the version next to it: Helm in the Dockerfile, kind in
-# .github/workflows/e2e-kind.yaml, kwokctl, the Flux controllers and CAPI in hack/e2e-kwok.env.
+# .github/workflows/e2e-kind.yaml, the manifests in hack/e2e-kind.sh, kwokctl, the Flux controllers and CAPI in hack/e2e-kwok.env.
 # Run it on a Renovate branch that moved one of those versions, then commit the result.
 # Downloads each artifact once (public GitHub and get.helm.sh), nothing else.
 #
@@ -62,3 +62,16 @@ for c in helm source; do
 done
 capi="$(value $env CAPI_VERSION)"
 pin $env CAPI_SHA256_SRC "$(sum "https://github.com/kubernetes-sigs/cluster-api/archive/refs/tags/$capi.tar.gz")"
+
+# e2e-kind.sh: the manifests hack/e2e-kind.sh downloads
+kind_sh=hack/e2e-kind.sh
+v() { value $kind_sh "$1"; }
+pin $kind_sh CERT_MANAGER_SHA256 "$(sum "https://github.com/cert-manager/cert-manager/releases/download/$(v CERT_MANAGER_VERSION)/cert-manager.yaml")"
+pin $kind_sh CAPI_SHA256 "$(sum "https://github.com/kubernetes-sigs/cluster-api/releases/download/$(v CAPI_VERSION)/core-components.yaml")"
+pin $kind_sh SERVICEMONITOR_CRD_SHA256 "$(sum "https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/$(v PROMETHEUS_OPERATOR_VERSION)/example/prometheus-operator-crd/monitoring.coreos.com_servicemonitors.yaml")"
+for c in source helm; do
+  key="$(tr '[:lower:]' '[:upper:]' <<<"$c")_CONTROLLER"
+  base="https://github.com/fluxcd/$c-controller/releases/download/$(v "${key}_VERSION")/$c-controller"
+  pin $kind_sh "${key}_CRDS_SHA256" "$(sum "$base.crds.yaml")"
+  pin $kind_sh "${key}_SHA256" "$(sum "$base.deployment.yaml")"
+done

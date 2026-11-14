@@ -1,0 +1,7 @@
+# The helm installer: the provider runs helm with its own ServiceAccount, so it needs every right
+# the vCluster chart's objects need. Broad by nature, see ../README.md.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+- helm_installer_role.yaml
+- helm_installer_role_binding.yaml

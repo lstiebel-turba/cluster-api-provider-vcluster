@@ -1,0 +1,21 @@
+# config/flux-installer with per-namespace rights: bind capv-manager-namespace-role with a
+# RoleBinding in each namespace with VClusters (../../rbac/README.md).
+namespace: capv-system
+namePrefix: capv-
+
+resources:
+- ../../crd
+- ../../rbac
+- ../../manager
+
+components:
+- ../../rbac/namespaced
+
+patches:
+- target:
+    kind: Deployment
+    name: controller-manager
+  patch: |-
+    - op: add
+      path: /spec/template/spec/containers/0/args/-
+      value: --installer=flux

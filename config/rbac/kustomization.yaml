@@ -1,8 +1,9 @@
+# The provider's own rights, cluster-wide: enough for the flux installer. role.yaml is generated
+# (make manifests). The helm installer adds the helm-installer component; per-namespace rights
+# come with the namespaced component. See README.md.
 resources:
-# All RBAC will be applied under this service account in
-# the deployment namespace. You may comment out this resource
-# if your manager will use a service account that exists at
-# runtime. Be sure to update RoleBinding and ClusterRoleBinding
-# subjects if changing service account names.
 - service_account.yaml
-- provider_role_binding.yaml
+- role.yaml
+- role_binding.yaml
+- leader_election_role.yaml
+- leader_election_role_binding.yaml

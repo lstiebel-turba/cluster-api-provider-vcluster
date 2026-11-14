@@ -21,6 +21,10 @@ var (
 	helmRepositoryGVK = schema.GroupVersionKind{Group: "source.toolkit.fluxcd.io", Version: "v1", Kind: "HelmRepository"}
 )
 
+// The flux installer writes a HelmRepository and a HelmRelease per VCluster (uncached, unstructured).
+//+kubebuilder:rbac:groups=helm.toolkit.fluxcd.io,resources=helmreleases,verbs=get;create;patch;delete
+//+kubebuilder:rbac:groups=source.toolkit.fluxcd.io,resources=helmrepositories,verbs=get;create;patch
+
 // FluxOptions configures the flux installer.
 type FluxOptions struct {
 	// RepositoryName names a HelmRepository shared by the VClusters of a namespace, never deleted

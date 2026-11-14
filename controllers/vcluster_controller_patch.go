@@ -19,6 +19,11 @@ var (
 	skipInfrastructureClusterAnnotation = "vcluster.loft.sh/skip-infrastructure-cluster-patch"
 )
 
+// A foreign infrastructure cluster gets the control plane endpoint (spec) and, for some kinds,
+// status.ready. Only the kinds named here; another kind needs its own rule (config/rbac/README.md).
+//+kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=kubevirtclusters;nutanixclusters;openstackclusters;packetclusters,verbs=get;patch
+//+kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=kubevirtclusters/status;nutanixclusters/status;packetclusters/status,verbs=patch
+
 func (r *GenericReconciler) patchInfrastructureCluster(ctx context.Context, cluster *clusterv1.Cluster, vCluster GenericVCluster) (retErr error) {
 	if !r.clusterKindExists || cluster == nil || vCluster.GetAnnotations()[skipInfrastructureClusterAnnotation] == "true" {
 		return nil

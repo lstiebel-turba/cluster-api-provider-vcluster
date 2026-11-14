@@ -80,6 +80,8 @@ func NewHTTPClientGetter() HTTPClientGetter {
 	return &httpClientGetter{}
 }
 
+// deleteHelmChart lists the release's Secrets: that right comes with the helm installer's role
+// (config/rbac/helm-installer), never with the provider's own, which reads no Secret by list.
 func deleteHelmChart(ctx context.Context, helmClient helm.Client, helmSecrets *helm.Secrets, namespace, name string, log logr.Logger) error {
 	release, err := helmSecrets.Get(ctx, name, namespace)
 	if err != nil {

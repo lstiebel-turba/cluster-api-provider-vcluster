@@ -75,6 +75,24 @@ type GenericVCluster interface {
 	GetStatus() *infrastructurev1alpha1.VClusterStatus
 }
 
+// The provider's own API calls; make manifests writes them to config/rbac/role.yaml. The helm
+// installer's rights (the chart's objects, the release Secrets) are in config/rbac/helm-installer.
+//
+// VClusters of both groups: the cache watches them, finalizers by update, the rest by patch;
+// finalizers also for the blockOwnerDeletion owner references on the HelmRelease and HelmRepository.
+//+kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io;controlplane.cluster.x-k8s.io,resources=vclusters,verbs=get;list;watch;update;patch
+//+kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io;controlplane.cluster.x-k8s.io,resources=vclusters/status,verbs=patch
+//+kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io;controlplane.cluster.x-k8s.io,resources=vclusters/finalizers,verbs=update
+// The owner Cluster (cached) and the VCluster's namespace (uncached, for the namespace selector).
+//+kubebuilder:rbac:groups=cluster.x-k8s.io,resources=clusters,verbs=get;list;watch
+//+kubebuilder:rbac:groups="",resources=namespaces,verbs=get
+// Uncached, in the VCluster's namespace: the vCluster's kubeconfig and certs Secrets (read), the
+// CAPI kubeconfig and CA Secrets (written), the vCluster Service (host discovery), the chart's
+// PersistentVolumeClaims (deleted with the VCluster).
+//+kubebuilder:rbac:groups="",resources=secrets,verbs=get;create;patch
+//+kubebuilder:rbac:groups="",resources=services,verbs=get
+//+kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=delete
+
 func (r *GenericReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Result, reterr error) {
 	r.Log.Info("Reconcile vCluster", "namespacedName", req.NamespacedName)
 

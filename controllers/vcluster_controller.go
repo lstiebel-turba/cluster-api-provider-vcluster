@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/utils/ptr"
@@ -91,7 +92,7 @@ type GenericVCluster interface {
 // PersistentVolumeClaims (deleted with the VCluster).
 //+kubebuilder:rbac:groups="",resources=secrets,verbs=get;create;patch
 //+kubebuilder:rbac:groups="",resources=services,verbs=get
-//+kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=delete
+//+kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=list;delete
 
 func (r *GenericReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Result, reterr error) {
 	r.Log.Info("Reconcile vCluster", "namespacedName", req.NamespacedName)
@@ -147,9 +148,8 @@ func (r *GenericReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ 
 			}
 		}
 
-		// delete the persistent volume claim
-		err = r.Client.Delete(ctx, &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "data-" + vCluster.GetName() + "-0", Namespace: req.Namespace}})
-		if err != nil && !kerrors.IsNotFound(err) {
+		// the chart is gone: its volumes go too
+		if err := r.deleteVolumes(ctx, vCluster); err != nil {
 			return ctrl.Result{}, err
 		}
 
@@ -271,6 +271,36 @@ func (r *GenericReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ 
 	}
 
 	return ctrl.Result{RequeueAfter: time.Minute}, nil
+}
+
+// chartVolumeApps are the app labels of the vCluster chart's StatefulSets: the control plane
+// (its volume holds embedded etcd or SQLite) and a deployed etcd.
+var chartVolumeApps = []string{"vcluster", "vcluster-etcd"}
+
+// deleteVolumes deletes the PersistentVolumeClaims of the VCluster's chart, once the chart is
+// uninstalled: the StatefulSet controller labels them with the StatefulSet's selector (app and
+// release=<name>), whatever their names (data-<name>-0, data-<name>-etcd-0, more replicas).
+// data-<name>-0 by name too, for charts whose volumes lack these labels.
+func (r *GenericReconciler) deleteVolumes(ctx context.Context, vCluster GenericVCluster) error {
+	names := sets.New("data-" + vCluster.GetName() + "-0")
+	for _, app := range chartVolumeApps {
+		list := &corev1.PersistentVolumeClaimList{}
+		err := r.Client.List(ctx, list, client.InNamespace(vCluster.GetNamespace()),
+			client.MatchingLabels{"app": app, "release": vCluster.GetName()})
+		if err != nil {
+			return fmt.Errorf("list volumes: %w", err)
+		}
+		for _, pvc := range list.Items {
+			names.Insert(pvc.Name)
+		}
+	}
+	for _, name := range sets.List(names) {
+		pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: vCluster.GetNamespace()}}
+		if err := r.Client.Delete(ctx, pvc); err != nil && !kerrors.IsNotFound(err) {
+			return fmt.Errorf("delete volume %s: %w", name, err)
+		}
+	}
+	return nil
 }
 
 func (r *GenericReconciler) reconcilePhase(vCluster GenericVCluster) {

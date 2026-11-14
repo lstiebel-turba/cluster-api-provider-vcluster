@@ -29,7 +29,7 @@ The provider runs as ServiceAccount `capv-controller-manager` in `capv-system`. 
 | core | `namespaces` | get | `--namespace-selector`, a namespace being deleted. |
 | core | `secrets` | get, create, patch | Reads `vc-<name>` and `<name>-certs`, writes `<cluster>-kubeconfig` and `<cluster>-ca`. No list or watch. |
 | core | `services` | get | The control plane host. |
-| core | `persistentvolumeclaims` | delete | The chart's volume, after the chart is gone. |
+| core | `persistentvolumeclaims` | list, delete | The chart's volumes (labels `app=vcluster` or `app=vcluster-etcd`, `release=<name>`), after the chart is gone. |
 | `helm.toolkit.fluxcd.io` | `helmreleases` | get, create, patch, delete | flux installer. |
 | `source.toolkit.fluxcd.io` | `helmrepositories` | get, create, patch | flux installer; a per-VCluster one goes with the VCluster by owner reference. |
 | `infrastructure.cluster.x-k8s.io` | `kubevirtclusters`, `nutanixclusters`, `openstackclusters`, `packetclusters` (and `/status`) | get, patch | A foreign infrastructure cluster gets the control plane endpoint. |

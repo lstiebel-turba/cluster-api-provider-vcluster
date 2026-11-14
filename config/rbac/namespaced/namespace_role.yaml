@@ -18,6 +18,7 @@ rules:
   - persistentvolumeclaims
   verbs:
   - delete
+  - list
 - apiGroups:
   - ""
   resources:

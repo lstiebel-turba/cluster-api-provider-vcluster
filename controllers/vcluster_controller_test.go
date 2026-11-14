@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -247,6 +248,7 @@ func newFluxEnv(t *testing.T, objs ...client.Object) *fluxEnv {
 	return &fluxEnv{t: t, c: c, h: h, r: &GenericReconciler{
 		Client:            c,
 		HelmClient:        h,
+		HelmSecrets:       helm.NewSecrets(c),
 		Log:               logr.Discard(),
 		Scheme:            c.Scheme(),
 		Options:           Options{Flux: FluxOptions{DriftDetection: "enabled"}},
@@ -407,6 +409,96 @@ func TestFluxInstallerDelete(t *testing.T) {
 	if e.h.upgrades != 0 {
 		t.Errorf("helm ran")
 	}
+}
+
+// chartVolumes are PVCs the way the StatefulSet controller labels them (its selector), for VCluster
+// vc1 with a deployed etcd and two replicas, plus the old unlabelled name and others to keep.
+func chartVolumes() (deleted, kept []client.Object) {
+	pvc := func(namespace, name string, labels map[string]string) client.Object {
+		return &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: labels}}
+	}
+	deleted = []client.Object{
+		pvc("ns", "data-vc1-0", nil),
+		pvc("ns", "data-vc1-1", map[string]string{"app": "vcluster", "release": "vc1"}),
+		pvc("ns", "data-vc1-etcd-0", map[string]string{"app": "vcluster-etcd", "release": "vc1"}),
+		pvc("ns", "data-vc1-etcd-1", map[string]string{"app": "vcluster-etcd", "release": "vc1"}),
+	}
+	kept = []client.Object{
+		pvc("ns", "data-vc2-0", map[string]string{"app": "vcluster", "release": "vc2"}),
+		pvc("ns", "data-vc2-etcd-0", map[string]string{"app": "vcluster-etcd", "release": "vc2"}),
+		pvc("ns", "postgres-0", map[string]string{"app": "postgres", "release": "vc1"}),
+		pvc("other", "data-vc1-etcd-0", map[string]string{"app": "vcluster-etcd", "release": "vc1"}),
+	}
+	return deleted, kept
+}
+
+func (e *fluxEnv) volumes() []string {
+	e.t.Helper()
+	list := &corev1.PersistentVolumeClaimList{}
+	if err := e.c.List(context.Background(), list); err != nil {
+		e.t.Fatal(err)
+	}
+	var names []string
+	for _, pvc := range list.Items {
+		names = append(names, pvc.Namespace+"/"+pvc.Name)
+	}
+	return names
+}
+
+func TestFluxInstallerDeletesVolumesAfterTheChart(t *testing.T) {
+	deleted, kept := chartVolumes()
+	e := newFluxEnv(t, append(append([]client.Object{&clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "ns"}}, fluxVCluster()}, deleted...), kept...)...)
+	e.reconcile(2)
+
+	// helm-controller's finalizer: the HelmRelease stays until it has uninstalled the chart
+	hr := e.helmRelease()
+	hr.SetFinalizers([]string{"finalizers.fluxcd.io"})
+	if err := e.c.Update(context.Background(), hr); err != nil {
+		t.Fatal(err)
+	}
+	vc := &infrastructurev1alpha1.VCluster{}
+	if err := e.c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "vc1"}, vc); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.c.Delete(context.Background(), vc); err != nil {
+		t.Fatal(err)
+	}
+	e.reconcile(2)
+	if got := e.volumes(); len(got) != len(deleted)+len(kept) {
+		t.Fatalf("volumes deleted before the chart: %v", got)
+	}
+
+	hr = e.helmRelease()
+	hr.SetFinalizers(nil)
+	if err := e.c.Update(context.Background(), hr); err != nil {
+		t.Fatal(err)
+	}
+	e.reconcile(1)
+	want := []string{"ns/data-vc2-0", "ns/data-vc2-etcd-0", "ns/postgres-0", "other/data-vc1-etcd-0"}
+	if got := e.volumes(); !slices.Equal(sorted(got), want) {
+		t.Errorf("volumes %v, want %v", got, want)
+	}
+	if err := e.c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "vc1"}, vc); !kerrors.IsNotFound(err) {
+		t.Errorf("VCluster still there: %v %v", err, vc.Finalizers)
+	}
+}
+
+func TestHelmInstallerDeletesVolumes(t *testing.T) {
+	deleted, kept := chartVolumes()
+	vc := ownedVCluster()
+	vc.DeletionTimestamp = ptr.To(metav1.Now())
+	e := newFluxEnv(t, append(append([]client.Object{&clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "ns"}}, vc}, deleted...), kept...)...)
+	e.reconcile(1)
+	want := []string{"ns/data-vc2-0", "ns/data-vc2-etcd-0", "ns/postgres-0", "other/data-vc1-etcd-0"}
+	if got := e.volumes(); !slices.Equal(sorted(got), want) {
+		t.Errorf("volumes %v, want %v", got, want)
+	}
+}
+
+func sorted(s []string) []string {
+	s = slices.Clone(s)
+	slices.Sort(s)
+	return s
 }
 
 func TestPostRenderersNeedFlux(t *testing.T) {

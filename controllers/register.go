@@ -27,6 +27,9 @@ type Options struct {
 
 	// Flux configures the flux installer.
 	Flux FluxOptions
+
+	// Concurrency is the number of VClusters each controller reconciles at once. 0: 1.
+	Concurrency int
 }
 
 func RegisterControllers(_ context.Context, mgr manager.Manager, options Options) error {

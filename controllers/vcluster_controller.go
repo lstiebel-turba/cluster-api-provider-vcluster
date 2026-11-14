@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -49,6 +50,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -281,7 +283,7 @@ func (r *GenericReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ 
 	markTrue(vCluster, infrastructurev1alpha1.InfrastructureClusterSyncedCondition)
 
 	// check if vcluster is ready
-	vCluster.GetStatus().Ready, err = r.checkReadyz(vCluster, restConfig)
+	vCluster.GetStatus().Ready, err = r.checkReadyz(ctx, vCluster, restConfig)
 	if vCluster.GetStatus().Ready {
 		// provisioned never goes back to false (Cluster API v1beta2 contract)
 		initialization(vCluster).Provisioned = ptr.To(true)
@@ -681,14 +683,19 @@ func (r *GenericReconciler) syncVClusterKubeconfig(ctx context.Context, vCluster
 	return restConfig, nil
 }
 
-func (r *GenericReconciler) checkReadyz(vCluster GenericVCluster, restConfig *rest.Config) (bool, error) {
+func (r *GenericReconciler) checkReadyz(ctx context.Context, vCluster GenericVCluster, restConfig *rest.Config) (bool, error) {
 	t := time.Now()
 	transport, err := rest.TransportFor(restConfig)
 	if err != nil {
 		return false, err
 	}
 	client := r.HTTPClientGetter.ClientFor(transport, 10*time.Second)
-	resp, err := client.Get(fmt.Sprintf("https://%s:%d/readyz", vCluster.GetSpec().ControlPlaneEndpoint.Host, vCluster.GetSpec().ControlPlaneEndpoint.Port))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		fmt.Sprintf("https://%s:%d/readyz", vCluster.GetSpec().ControlPlaneEndpoint.Host, vCluster.GetSpec().ControlPlaneEndpoint.Port), nil)
+	if err != nil {
+		return false, err
+	}
+	resp, err := client.Do(req)
 	r.Log.V(1).Info("ready check done", "namespace", vCluster.GetNamespace(), "name", vCluster.GetName(), "duration", time.Since(t))
 	if err != nil {
 		return false, err
@@ -715,7 +722,8 @@ func (r *GenericReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	b := ctrl.NewControllerManagedBy(mgr).
 		For(r.New()).
-		Named(r.ControllerName)
+		Named(r.ControllerName).
+		WithOptions(controller.Options{MaxConcurrentReconciles: max(r.Options.Concurrency, 1)})
 	if r.clusterKindExists {
 		gvk, err := apiutil.GVKForObject(r.New(), mgr.GetScheme())
 		if err != nil {

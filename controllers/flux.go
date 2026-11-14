@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"strings"
 
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
@@ -15,6 +16,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/yaml"
 )
+
+// fluxReconcileAnnotations are Flux's reconcile requests: set on a VCluster, they go on to its
+// HelmRelease (requestedAt also on its HelmRepository), so whoever owns the VCluster asks
+// helm-controller for a reconcile, a reset of the retries or a forced upgrade.
+var fluxReconcileAnnotations = []string{
+	"reconcile.fluxcd.io/requestedAt",
+	"reconcile.fluxcd.io/resetAt",
+	"reconcile.fluxcd.io/forceAt",
+}
 
 var (
 	helmReleaseGVK    = schema.GroupVersionKind{Group: "helm.toolkit.fluxcd.io", Version: "v2", Kind: "HelmRelease"}
@@ -57,6 +67,34 @@ func newUnstructured(gvk schema.GroupVersionKind, namespace, name string) *unstr
 	return u
 }
 
+// copyFluxMetadata puts the VCluster's labels and the given Flux annotations it carries on
+// obj, so selectors and watches on the VCluster's labels find the Flux objects too. Labels and
+// annotations of obj's own stay.
+func copyFluxMetadata(vCluster GenericVCluster, obj *unstructured.Unstructured, annotationKeys []string) {
+	if l := vCluster.GetLabels(); len(l) > 0 {
+		labels := obj.GetLabels()
+		if labels == nil {
+			labels = map[string]string{}
+		}
+		maps.Copy(labels, l)
+		obj.SetLabels(labels)
+	}
+	annotations := obj.GetAnnotations()
+	for _, key := range annotationKeys {
+		value, ok := vCluster.GetAnnotations()[key]
+		if !ok {
+			continue
+		}
+		if annotations == nil {
+			annotations = map[string]string{}
+		}
+		annotations[key] = value
+	}
+	if annotations != nil {
+		obj.SetAnnotations(annotations)
+	}
+}
+
 func (r *GenericReconciler) fluxRepositoryName(vCluster GenericVCluster) string {
 	if r.Options.Flux.RepositoryName != "" {
 		return r.Options.Flux.RepositoryName
@@ -84,6 +122,8 @@ func (r *GenericReconciler) fluxDeploy(ctx context.Context, vCluster GenericVClu
 		if r.Options.Flux.RepositoryName != "" {
 			return nil
 		}
+		// a VCluster's own repository: its labels and reconcile requests, as its HelmRelease
+		copyFluxMetadata(vCluster, repo, fluxReconcileAnnotations[:1])
 		return controllerutil.SetControllerReference(vCluster, repo, r.Client.Scheme())
 	})
 	if err != nil {
@@ -117,6 +157,7 @@ func (r *GenericReconciler) fluxDeploy(ctx context.Context, vCluster GenericVClu
 			spec["postRenderers"] = chart.postRenderers
 		}
 		release.Object["spec"] = spec
+		copyFluxMetadata(vCluster, release, fluxReconcileAnnotations)
 		return controllerutil.SetControllerReference(vCluster, release, r.Client.Scheme())
 	})
 	if err != nil {

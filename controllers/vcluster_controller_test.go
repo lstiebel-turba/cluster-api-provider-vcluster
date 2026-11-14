@@ -512,3 +512,55 @@ func TestPostRenderersNeedFlux(t *testing.T) {
 		t.Errorf("HelmChartDeployed: %+v", c)
 	}
 }
+
+func TestFluxInstallerCopiesLabelsAndReconcileRequests(t *testing.T) {
+	vc := fluxVCluster()
+	vc.Labels = map[string]string{"turba-env.dev/tenant": "alice"}
+	vc.Annotations = map[string]string{
+		"reconcile.fluxcd.io/requestedAt": "op-1",
+		"reconcile.fluxcd.io/resetAt":     "op-1",
+		"unrelated":                       "x",
+	}
+	e := newFluxEnv(t, &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "ns"}}, vc)
+	e.reconcile(2)
+
+	hr := e.helmRelease()
+	if hr.GetLabels()["turba-env.dev/tenant"] != "alice" {
+		t.Errorf("HelmRelease labels: %v", hr.GetLabels())
+	}
+	a := hr.GetAnnotations()
+	if a["reconcile.fluxcd.io/requestedAt"] != "op-1" || a["reconcile.fluxcd.io/resetAt"] != "op-1" {
+		t.Errorf("HelmRelease annotations: %v", a)
+	}
+	if _, ok := a["unrelated"]; ok {
+		t.Errorf("unrelated annotation copied: %v", a)
+	}
+
+	repo := newUnstructured(helmRepositoryGVK, "ns", "vc1")
+	if err := e.c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "vc1"}, repo); err != nil {
+		t.Fatal(err)
+	}
+	if repo.GetLabels()["turba-env.dev/tenant"] != "alice" {
+		t.Errorf("HelmRepository labels: %v", repo.GetLabels())
+	}
+	ra := repo.GetAnnotations()
+	if ra["reconcile.fluxcd.io/requestedAt"] != "op-1" {
+		t.Errorf("HelmRepository annotations: %v", ra)
+	}
+	if _, ok := ra["reconcile.fluxcd.io/resetAt"]; ok {
+		t.Errorf("resetAt on the HelmRepository: %v", ra)
+	}
+
+	// a new request on the VCluster reaches the HelmRelease
+	if err := e.c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "vc1"}, vc); err != nil {
+		t.Fatal(err)
+	}
+	vc.Annotations["reconcile.fluxcd.io/requestedAt"] = "op-2"
+	if err := e.c.Update(context.Background(), vc); err != nil {
+		t.Fatal(err)
+	}
+	e.reconcile(1)
+	if got := e.helmRelease().GetAnnotations()["reconcile.fluxcd.io/requestedAt"]; got != "op-2" {
+		t.Errorf("requestedAt after the second request: %q", got)
+	}
+}

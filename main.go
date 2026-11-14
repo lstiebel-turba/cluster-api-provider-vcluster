@@ -70,6 +70,7 @@ func main() {
 	var installer string
 	var fluxRepositoryName string
 	var fluxDriftDetection string
+	var fluxRepositoryProvider string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -80,6 +81,7 @@ func main() {
 	flag.BoolVar(&requireChartVersion, "require-chart-version", false, "Refuse a VCluster without spec.helmRelease.chart.version instead of installing the latest chart.")
 	flag.StringVar(&installer, "installer", "helm", "The installer of a VCluster without spec.helmRelease.installer: helm (the helm CLI) or flux (a Flux HelmRelease).")
 	flag.StringVar(&fluxRepositoryName, "flux-repository-name", "", "flux installer: a HelmRepository shared by a namespace's VClusters. Empty: one per VCluster.")
+	flag.StringVar(&fluxRepositoryProvider, "flux-repository-provider", "", "flux installer: an OCI HelmRepository's spec.provider (generic, aws, azure, gcp), for a registry that takes the cloud identity of source-controller. Empty: none.")
 	flag.StringVar(&fluxDriftDetection, "flux-drift-detection", "enabled", "flux installer: the HelmRelease's driftDetection.mode (enabled, warn, disabled).")
 
 	opts := zap.Options{
@@ -102,6 +104,13 @@ func main() {
 
 	if installer != string(infrastructurev1alpha1.HelmInstaller) && installer != string(infrastructurev1alpha1.FluxInstaller) {
 		setupLog.Error(nil, "--installer must be helm or flux", "installer", installer)
+		os.Exit(1)
+	}
+
+	switch fluxRepositoryProvider {
+	case "", "generic", "aws", "azure", "gcp":
+	default:
+		setupLog.Error(nil, "--flux-repository-provider must be generic, aws, azure or gcp", "provider", fluxRepositoryProvider)
 		os.Exit(1)
 	}
 
@@ -150,8 +159,9 @@ func main() {
 		RequireChartVersion: requireChartVersion,
 		Installer:           infrastructurev1alpha1.Installer(installer),
 		Flux: controllers.FluxOptions{
-			RepositoryName: fluxRepositoryName,
-			DriftDetection: fluxDriftDetection,
+			RepositoryName:     fluxRepositoryName,
+			RepositoryProvider: fluxRepositoryProvider,
+			DriftDetection:     fluxDriftDetection,
 		},
 	}); err != nil {
 		setupLog.Error(err, "unable to register controllers")

@@ -41,6 +41,11 @@ type FluxOptions struct {
 	// by the provider. Empty: one per VCluster, named after it and owned by it.
 	RepositoryName string
 
+	// RepositoryProvider is an OCI HelmRepository's spec.provider (generic, aws, azure, gcp):
+	// source-controller logs in to the registry with its cloud identity, for example to a mirror
+	// in Artifact Registry. Empty: none (generic).
+	RepositoryProvider string
+
 	// DriftDetection is the HelmRelease's spec.driftDetection.mode: enabled, warn or disabled.
 	DriftDetection string
 }
@@ -115,9 +120,19 @@ func (r *GenericReconciler) fluxDeploy(ctx context.Context, vCluster GenericVClu
 	repoName := r.fluxRepositoryName(vCluster)
 	repo := newUnstructured(helmRepositoryGVK, vCluster.GetNamespace(), repoName)
 	_, err := controllerutil.CreateOrPatch(ctx, r.Client, repo, func() error {
-		spec := map[string]any{"url": chart.repo, "interval": "1h"}
+		// field by field: what someone else set on a shared repository (a secretRef) stays
+		spec, _, _ := unstructured.NestedMap(repo.Object, "spec")
+		if spec == nil {
+			spec = map[string]any{}
+		}
+		spec["url"], spec["interval"] = chart.repo, "1h"
+		delete(spec, "type")
+		delete(spec, "provider")
 		if strings.HasPrefix(chart.repo, "oci://") {
 			spec["type"] = "oci"
+			if provider := r.Options.Flux.RepositoryProvider; provider != "" {
+				spec["provider"] = provider
+			}
 		}
 		repo.Object["spec"] = spec
 		if r.Options.Flux.RepositoryName != "" {

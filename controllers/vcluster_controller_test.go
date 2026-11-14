@@ -587,3 +587,51 @@ func TestFluxDriftDetectionPerVCluster(t *testing.T) {
 		t.Errorf("driftDetection.mode %q after the change, want enabled", mode)
 	}
 }
+
+func TestFluxRepositoryProvider(t *testing.T) {
+	// a shared repository someone else made, with a field the provider doesn't write
+	shared := newUnstructured(helmRepositoryGVK, "ns", "mirror")
+	shared.Object["spec"] = map[string]any{"url": "oci://old.example/charts", "secretRef": map[string]any{"name": "pull"}}
+	e := newFluxEnv(t, &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "ns"}}, fluxVCluster(), shared)
+	e.r.Options.Flux.RepositoryName = "mirror"
+	e.r.Options.Flux.RepositoryProvider = "gcp"
+	e.reconcile(2)
+
+	repo := newUnstructured(helmRepositoryGVK, "ns", "mirror")
+	if err := e.c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "mirror"}, repo); err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]any{
+		"spec.url":            "oci://mirror.example/charts",
+		"spec.type":           "oci",
+		"spec.provider":       "gcp",
+		"spec.secretRef.name": "pull",
+	} {
+		got, _, _ := unstructured.NestedFieldNoCopy(repo.Object, strings.Split(path, ".")...)
+		if got != want {
+			t.Errorf("%s = %v, want %v", path, got, want)
+		}
+	}
+	if name, _, _ := unstructured.NestedString(e.helmRelease().Object, "spec", "chart", "spec", "sourceRef", "name"); name != "mirror" {
+		t.Errorf("sourceRef %q", name)
+	}
+}
+
+func TestFluxRepositoryProviderOnlyForOCI(t *testing.T) {
+	vc := fluxVCluster()
+	vc.Spec.HelmRelease.Chart.Repo = "https://charts.example"
+	e := newFluxEnv(t, &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "ns"}}, vc)
+	e.r.Options.Flux.RepositoryProvider = "gcp"
+	e.reconcile(2)
+	repo := newUnstructured(helmRepositoryGVK, "ns", "vc1")
+	if err := e.c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "vc1"}, repo); err != nil {
+		t.Fatal(err)
+	}
+	spec, _, _ := unstructured.NestedMap(repo.Object, "spec")
+	if _, ok := spec["provider"]; ok {
+		t.Errorf("provider on an HTTP repository: %v", spec)
+	}
+	if _, ok := spec["type"]; ok {
+		t.Errorf("type on an HTTP repository: %v", spec)
+	}
+}

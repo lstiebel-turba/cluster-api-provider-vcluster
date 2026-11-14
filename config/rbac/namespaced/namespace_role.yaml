@@ -1,6 +1,6 @@
 # The per-namespace part of manager-role (../role.yaml). Not bound here: bind it with a RoleBinding
 # in each namespace whose VClusters the provider reconciles (../README.md). No chart rights: the
-# flux installer's helm-controller installs the chart with its own ServiceAccount.
+# flux installer's helm-controller installs the chart (../README.md, --flux-service-account).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:

@@ -1,4 +1,5 @@
-# The cluster-wide part of manager-role (../role.yaml): what has no namespace or is watched in all.
+# The cluster-wide part of manager-role (../role.yaml): what has no namespace or is watched in all
+# (the HelmReleases' metadata too: the cache watches them wherever it watches VClusters).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -16,6 +17,13 @@ rules:
   - clusters
   verbs:
   - get
+  - list
+  - watch
+- apiGroups:
+  - helm.toolkit.fluxcd.io
+  resources:
+  - helmreleases
+  verbs:
   - list
   - watch
 - apiGroups:

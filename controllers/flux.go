@@ -32,7 +32,8 @@ var (
 )
 
 // The flux installer writes a HelmRepository and a HelmRelease per VCluster (uncached, unstructured).
-//+kubebuilder:rbac:groups=helm.toolkit.fluxcd.io,resources=helmreleases,verbs=get;create;patch;delete
+// The HelmReleases' metadata is watched (cached): a change reconciles the VCluster that controls one.
+//+kubebuilder:rbac:groups=helm.toolkit.fluxcd.io,resources=helmreleases,verbs=get;list;watch;create;patch;delete
 //+kubebuilder:rbac:groups=source.toolkit.fluxcd.io,resources=helmrepositories,verbs=get;create;patch
 
 // FluxOptions configures the flux installer.

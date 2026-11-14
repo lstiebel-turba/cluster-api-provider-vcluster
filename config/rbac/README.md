@@ -30,7 +30,7 @@ The provider runs as ServiceAccount `capvc-controller-manager` in `capvc-system`
 | core | `secrets` | get, create, patch | Reads `vc-<name>` and `<name>-certs`, writes `<cluster>-kubeconfig` and `<cluster>-ca`. No list or watch. |
 | core | `services` | get | The control plane host. |
 | core | `persistentvolumeclaims` | list, delete | The chart's volumes (labels `app=vcluster` or `app=vcluster-etcd`, `release=<name>`), after the chart is gone. |
-| `helm.toolkit.fluxcd.io` | `helmreleases` | get, create, patch, delete | flux installer. |
+| `helm.toolkit.fluxcd.io` | `helmreleases` | get, list, watch, create, patch, delete | flux installer; the cache watches their metadata, a change reconciles the VCluster that controls one. |
 | `source.toolkit.fluxcd.io` | `helmrepositories` | get, create, patch | flux installer; a per-VCluster one goes with the VCluster by owner reference. |
 | `infrastructure.cluster.x-k8s.io` | `kubevirtclusters`, `nutanixclusters`, `openstackclusters`, `packetclusters` (and `/status`) | get, patch | A foreign infrastructure cluster gets the control plane endpoint. |
 
@@ -46,7 +46,7 @@ An infrastructure cluster of another kind (not a VCluster) needs a rule of its o
 `namespaced/` drops `manager-role` and its binding and adds:
 
 - `manager-cluster-role`, bound cluster-wide: VClusters, Clusters, namespaces, infrastructure
-  clusters.
+  clusters, and list and watch on HelmReleases (their metadata, cached like the VClusters).
 - `manager-namespace-role`, not bound: Secrets, Services, PersistentVolumeClaims, HelmReleases,
   HelmRepositories. Bind it in each namespace with VClusters, and limit the provider to them with
   `--namespace` or `--namespace-selector`:

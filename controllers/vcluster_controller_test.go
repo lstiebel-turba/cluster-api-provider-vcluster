@@ -2,9 +2,11 @@ package controllers
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
@@ -31,12 +33,15 @@ import (
 	"github.com/loft-sh/cluster-api-provider-vcluster/pkg/helm"
 )
 
-type countingHelm struct{ upgrades int }
+type countingHelm struct {
+	upgrades int
+	fail     error // Upgrade's error
+}
 
 func (c *countingHelm) Install(_, _ string, _ helm.UpgradeOptions) error { return nil }
 func (c *countingHelm) Upgrade(_, _ string, _ helm.UpgradeOptions) error {
 	c.upgrades++
-	return nil
+	return c.fail
 }
 func (c *countingHelm) Rollback(_, _ string, _ string) error { return nil }
 func (c *countingHelm) Delete(_, _ string) error             { return nil }
@@ -77,17 +82,6 @@ func reconcileOnce(t *testing.T, objs ...client.Object) (*countingHelm, *infrast
 
 func reconcileWith(t *testing.T, options Options, objs ...client.Object) (*countingHelm, *infrastructurev1alpha1.VCluster) {
 	t.Helper()
-	return reconcileTwice(t, false, options, objs...)
-}
-
-// reconcileExpectErr is reconcileWith for a deploy that fails: Reconcile returns the error.
-func reconcileExpectErr(t *testing.T, options Options, objs ...client.Object) (*countingHelm, *infrastructurev1alpha1.VCluster) {
-	t.Helper()
-	return reconcileTwice(t, true, options, objs...)
-}
-
-func reconcileTwice(t *testing.T, expectErr bool, options Options, objs ...client.Object) (*countingHelm, *infrastructurev1alpha1.VCluster) {
-	t.Helper()
 	h := &countingHelm{}
 	c := fakeclient.NewClientBuilder().
 		WithScheme(testScheme(t)).
@@ -107,16 +101,12 @@ func reconcileTwice(t *testing.T, expectErr bool, options Options, objs ...clien
 	// twice: the first pass only sets the Paused condition and requeues
 	var errs []error
 	for range 2 {
-		// a failed deploy returns its error for the backoff; the conditions carry it too
 		_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "ns", Name: "vc1"}})
 		if err != nil {
 			errs = append(errs, err)
 		}
 	}
-	switch {
-	case expectErr && len(errs) == 0:
-		t.Error("reconcile: no error, want one")
-	case !expectErr && len(errs) > 0:
+	if len(errs) > 0 {
 		t.Errorf("reconcile: %v", errs)
 	}
 	got := &infrastructurev1alpha1.VCluster{}
@@ -369,7 +359,7 @@ func TestHelmInstallerLogsNoValues(t *testing.T) {
 
 func TestRequireChartVersion(t *testing.T) {
 	cluster := &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "ns"}}
-	h, got := reconcileExpectErr(t, Options{RequireChartVersion: true}, cluster, ownedVCluster())
+	h, got := reconcileWith(t, Options{RequireChartVersion: true}, cluster, ownedVCluster())
 	if h.upgrades != 0 {
 		t.Errorf("helm upgrades without a chart version: %d", h.upgrades)
 	}
@@ -531,11 +521,18 @@ func TestFluxInstallerWritesHelmRelease(t *testing.T) {
 	}
 }
 
+// A stalled HelmRelease fails the VCluster without an error: no backoff, a requeue in a minute
+// (the HelmRelease watch reports a recovery sooner).
 func TestFluxInstallerStalled(t *testing.T) {
 	e := newFluxEnv(t, &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "ns"}}, fluxVCluster())
+	e.r.helmReleaseWatched = true
 	e.reconcile(2)
 	e.setHelmReleaseStatus("Stalled", "True")
-	got := e.reconcileExpectErr(1)
+	result, err := e.r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "ns", Name: "vc1"}})
+	if err != nil || result.RequeueAfter != time.Minute {
+		t.Errorf("Reconcile of a stalled HelmRelease: %+v, %v; want a requeue in a minute, no error", result, err)
+	}
+	got := e.reconcile(1)
 	if c := conditions.Get(got, infrastructurev1alpha1.HelmChartDeployedCondition); c == nil || c.Reason != infrastructurev1alpha1.HelmDeployFailedReason {
 		t.Errorf("HelmChartDeployed after Stalled: %+v", c)
 	}
@@ -715,7 +712,7 @@ func sorted(s []string) []string {
 func TestPostRenderersNeedFlux(t *testing.T) {
 	vc := fluxVCluster()
 	vc.Spec.HelmRelease.Installer = infrastructurev1alpha1.HelmInstaller
-	h, got := reconcileExpectErr(t, Options{}, &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "ns"}}, vc)
+	h, got := reconcileWith(t, Options{}, &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "ns"}}, vc)
 	if h.upgrades != 0 {
 		t.Errorf("helm ran with postRenderers")
 	}
@@ -942,5 +939,20 @@ func TestInstallerRecorded(t *testing.T) {
 	e.reconcile(1)
 	if err := e.c.Get(context.Background(), client.ObjectKeyFromObject(hr), hr); !kerrors.IsNotFound(err) {
 		t.Errorf("HelmRelease after the delete: %v", err)
+	}
+}
+
+// A failed helm upgrade returns its error for the backoff, without a RequeueAfter.
+func TestHelmUpgradeFailureBacksOff(t *testing.T) {
+	e := newFluxEnv(t, &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "ns"}}, ownedVCluster())
+	e.h.fail = errors.New("boom")
+	e.reconcile(1) // the Paused condition
+	result, err := e.r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "ns", Name: "vc1"}})
+	if err == nil || !result.IsZero() {
+		t.Errorf("Reconcile of a failed upgrade: %+v, %v; want the error alone", result, err)
+	}
+	got := e.reconcileExpectErr(1)
+	if c := conditions.Get(got, infrastructurev1alpha1.HelmChartDeployedCondition); c == nil || c.Reason != infrastructurev1alpha1.HelmDeployFailedReason {
+		t.Errorf("HelmChartDeployed: %+v", c)
 	}
 }

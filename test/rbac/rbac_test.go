@@ -85,19 +85,23 @@ func TestNamespacedSplit(t *testing.T) {
 	noWildcards(t, "manager-cluster-role", clusterRole.Rules)
 	noWildcards(t, "manager-namespace-role", namespaceRole.Rules)
 
-	perNamespace := map[string]bool{
+	namespaced := map[string]bool{
 		"secrets": true, "services": true, "persistentvolumeclaims": true,
 		"helmreleases": true, "helmrepositories": true,
 	}
+	// the cache watches HelmReleases (metadata) wherever it watches VClusters: cluster-wide
+	perNamespace := func(g grant) bool {
+		return namespaced[g.resource] && (g.resource != "helmreleases" || (g.verb != "list" && g.verb != "watch"))
+	}
 	got := map[grant]bool{}
 	for g := range grants(clusterRole.Rules) {
-		if perNamespace[g.resource] {
+		if perNamespace(g) {
 			t.Errorf("manager-cluster-role: %v belongs in manager-namespace-role", g)
 		}
 		got[g] = true
 	}
 	for g := range grants(namespaceRole.Rules) {
-		if !perNamespace[g.resource] {
+		if !perNamespace(g) {
 			t.Errorf("manager-namespace-role: %v belongs in manager-cluster-role", g)
 		}
 		got[g] = true

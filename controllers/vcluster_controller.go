@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -75,6 +76,7 @@ type GenericReconciler struct {
 	ControllerName     string
 	Options            Options
 	clusterKindExists  bool
+	helmReleaseWatched bool
 
 	New func() GenericVCluster
 }
@@ -155,7 +157,7 @@ func (r *GenericReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ 
 				return ctrl.Result{}, err
 			}
 			if !gone {
-				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+				return ctrl.Result{RequeueAfter: r.fluxPollInterval()}, nil
 			}
 		} else {
 			err = deleteHelmChart(ctx, r.HelmClient, r.HelmSecrets, req.Namespace, req.Name, r.Log)
@@ -232,7 +234,7 @@ func (r *GenericReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ 
 	err = r.redeployIfNeeded(ctx, vCluster)
 	if err == nil && !conditions.IsTrue(vCluster, infrastructurev1alpha1.HelmChartDeployedCondition) {
 		// the flux installer: helm-controller still installing or upgrading
-		return ctrl.Result{RequeueAfter: time.Second * 5}, nil
+		return ctrl.Result{RequeueAfter: r.fluxPollInterval()}, nil
 	}
 	if err != nil {
 		r.Log.Error(err, "error during virtual cluster deploy",
@@ -245,7 +247,12 @@ func (r *GenericReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ 
 			Reason:  infrastructurev1alpha1.HelmDeployFailedReason,
 			Message: err.Error(),
 		})
-		return ctrl.Result{RequeueAfter: time.Second * 5}, err
+		if errors.Is(err, errDeployRefused) {
+			// a retry changes nothing until the spec does (a new event) or helm-controller
+			// recovers (the HelmRelease watch); the requeue is the fallback
+			return ctrl.Result{RequeueAfter: time.Minute}, nil
+		}
+		return ctrl.Result{}, err
 	}
 
 	// check if vcluster is initialized and sync the kubeconfig Secret
@@ -441,10 +448,31 @@ func sha256Hex(s string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// errDeployRefused marks a deploy that fails until the spec changes or helm-controller recovers:
+// an invalid spec, a stalled HelmRelease.
+var errDeployRefused = errors.New("deploy refused")
+
+type deployRefusedError struct{ err error }
+
+func (e deployRefusedError) Error() string   { return e.err.Error() }
+func (e deployRefusedError) Unwrap() []error { return []error{e.err, errDeployRefused} }
+func refused(format string, args ...any) error {
+	return deployRefusedError{fmt.Errorf(format, args...)}
+}
+
+// fluxPollInterval is how often a VCluster waiting for helm-controller is reconciled again: the
+// HelmRelease watch reports a change sooner, the poll is the fallback without it.
+func (r *GenericReconciler) fluxPollInterval() time.Duration {
+	if r.helmReleaseWatched {
+		return time.Minute
+	}
+	return 5 * time.Second
+}
+
 func (r *GenericReconciler) redeployIfNeeded(ctx context.Context, vCluster GenericVCluster) error {
 	chart, err := r.chartSpec(vCluster)
 	if err != nil {
-		return err
+		return deployRefusedError{err}
 	}
 
 	// flux: write the HelmRelease every time, helm-controller decides whether to upgrade
@@ -454,7 +482,7 @@ func (r *GenericReconciler) redeployIfNeeded(ctx context.Context, vCluster Gener
 		case err != nil:
 			return err
 		case state.failed:
-			return fmt.Errorf("HelmRelease stalled: %s", state.message)
+			return refused("HelmRelease stalled: %s", state.message)
 		case !state.ready:
 			conditions.Set(vCluster, metav1.Condition{
 				Type:    infrastructurev1alpha1.HelmChartDeployedCondition,
@@ -732,6 +760,15 @@ func (r *GenericReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// a paused VCluster isn't requeued: the Cluster's pause and unpause must reach it
 		b = b.Watches(&clusterv1.Cluster{}, handler.EnqueueRequestsFromMapFunc(clusterToVCluster(gvk)),
 			builder.WithPredicates(clusterPauseChanged()))
+	}
+	// the flux installer: a change of a HelmRelease the VCluster controls (helm-controller's
+	// status) reaches it at once; without Flux's CRD the 5 s poll stays
+	r.helmReleaseWatched, err = kindExists(mgr.GetConfig(), helmReleaseGVK)
+	if err != nil {
+		return err
+	}
+	if r.helmReleaseWatched {
+		b = b.Owns(newUnstructured(helmReleaseGVK, "", ""), builder.OnlyMetadata)
 	}
 	return b.Complete(r)
 }

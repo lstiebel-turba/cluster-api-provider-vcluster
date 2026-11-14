@@ -74,9 +74,6 @@ run: manifests generate fmt vet ## Run a controller from your host.
 
 .PHONY: docker-build
 docker-build: manifests generate fmt vet envtest ## Build docker image with the manager.
-	rm -r release || true
-	mkdir -p release
-	CGO_ENABLED=0 GOOS=linux GOARCH=$(TARGETARCH) go build -o release/manager main.go
 	docker buildx build --platform linux/$(TARGETARCH) --load -t ${IMG} .
 
 .PHONY: docker-push

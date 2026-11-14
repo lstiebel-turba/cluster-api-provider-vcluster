@@ -1,3 +1,4 @@
+# Upstream's devspace e2e, by hand only until the kind e2e replaces it (ci.yaml runs the unit tests).
 name: Tests
 
 on:
@@ -9,14 +10,6 @@ on:
           (https://github.com/lhotari/action-upterm/)
         required: false
         default: false
-  push:
-    tags:
-      - v*
-    branches:
-      - main
-    paths:
-      - "**/*.go"
-  pull_request:
 
 concurrency:
   group: e2e-${{ github.head_ref || github.ref_name }}

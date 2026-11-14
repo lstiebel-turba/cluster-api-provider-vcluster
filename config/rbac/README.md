@@ -15,7 +15,7 @@ The provider runs as ServiceAccount `capvc-controller-manager` in `capvc-system`
 | Overlay | Installer | Rights |
 | --- | --- | --- |
 | `config/default` (`make release`) | helm (default) | `manager-role` and `helm-installer-role`, cluster-wide. |
-| `config/flux-installer` | `--installer=flux` | `manager-role` cluster-wide, no chart rights. |
+| `config/flux-installer` | `--installer=flux` | `manager-role` cluster-wide, no chart rights (helm-controller's, see [Per namespace](#per-namespace-flux-installer)). |
 | `config/flux-installer/namespaced` | `--installer=flux` | `manager-cluster-role` cluster-wide, `manager-namespace-role` per namespace. |
 
 ## manager-role
@@ -67,8 +67,15 @@ subjects:
   namespace: capvc-system
 ```
 
-helm-controller installs the chart with its own ServiceAccount; the provider holds no right on the
-chart's objects.
+The provider holds no right on the chart's objects: helm-controller installs the chart. Without
+`--flux-service-account` it does so with its own ServiceAccount, by default bound to
+`cluster-admin`, so whoever may write a VCluster's spec (`chart.repo`, values, `postRenderers`)
+gets helm-controller's rights through the chart. To confine that, create a ServiceAccount with
+the chart's rights (the list under [the helm installer](#still-broad-the-helm-installer), as a
+Role where it can be) in each namespace with VClusters and start the provider with
+`--flux-service-account=<name>`: the HelmRelease's `spec.serviceAccountName`, which helm-controller
+impersonates. helm-controller's `--default-service-account` does the same for every HelmRelease
+without one.
 
 ## Still broad: the helm installer
 
@@ -79,5 +86,6 @@ ClusterRoleBindings and the optional Ingress, NetworkPolicy, PodDisruptionBudget
 TLSRoute, LimitRange and ResourceQuota. The chart's Role and ClusterRole grant rights the provider
 does not hold, so `helm-installer-role` carries `escalate` and `bind` on Roles and ClusterRoles:
 in practice as strong as `cluster-admin`, cluster-wide. Objects from
-`experimental.deploy.host.manifests` or another chart need rules of their own. Use the flux
-installer where that matters.
+`experimental.deploy.host.manifests` or another chart need rules of their own. Where that
+matters use the flux installer with `--flux-service-account` (above); the flux installer alone
+moves these rights to helm-controller.

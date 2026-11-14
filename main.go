@@ -71,6 +71,7 @@ func main() {
 	var fluxRepositoryName string
 	var fluxDriftDetection string
 	var fluxRepositoryProvider string
+	var fluxServiceAccount string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -82,6 +83,7 @@ func main() {
 	flag.StringVar(&installer, "installer", "helm", "The installer of a VCluster without spec.helmRelease.installer: helm (the helm CLI) or flux (a Flux HelmRelease).")
 	flag.StringVar(&fluxRepositoryName, "flux-repository-name", "", "flux installer: a HelmRepository shared by a namespace's VClusters. Empty: one per VCluster.")
 	flag.StringVar(&fluxRepositoryProvider, "flux-repository-provider", "", "flux installer: an OCI HelmRepository's spec.provider (generic, aws, azure, gcp), for a registry that takes the cloud identity of source-controller. Empty: none.")
+	flag.StringVar(&fluxServiceAccount, "flux-service-account", "", "flux installer: the HelmRelease's serviceAccountName, a ServiceAccount in the VCluster's namespace helm-controller impersonates to install the chart. Empty: helm-controller's own rights.")
 	flag.StringVar(&fluxDriftDetection, "flux-drift-detection", "enabled", "flux installer: the HelmRelease's driftDetection.mode (enabled, warn, disabled).")
 
 	opts := zap.Options{
@@ -162,6 +164,7 @@ func main() {
 			RepositoryName:     fluxRepositoryName,
 			RepositoryProvider: fluxRepositoryProvider,
 			DriftDetection:     fluxDriftDetection,
+			ServiceAccountName: fluxServiceAccount,
 		},
 	}); err != nil {
 		setupLog.Error(err, "unable to register controllers")

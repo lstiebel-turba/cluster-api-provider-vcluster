@@ -48,6 +48,12 @@ type FluxOptions struct {
 
 	// DriftDetection is the HelmRelease's spec.driftDetection.mode: enabled, warn or disabled.
 	DriftDetection string
+
+	// ServiceAccountName is the HelmRelease's spec.serviceAccountName: helm-controller
+	// impersonates this ServiceAccount of the VCluster's namespace to install the chart, so the
+	// chart gets that account's rights instead of helm-controller's. Empty: none (helm-controller's
+	// own rights, or its --default-service-account).
+	ServiceAccountName string
 }
 
 // chartSpec is what either installer installs.
@@ -175,6 +181,9 @@ func (r *GenericReconciler) fluxDeploy(ctx context.Context, vCluster GenericVClu
 		}
 		if len(chart.postRenderers) > 0 {
 			spec["postRenderers"] = chart.postRenderers
+		}
+		if sa := r.Options.Flux.ServiceAccountName; sa != "" {
+			spec["serviceAccountName"] = sa
 		}
 		release.Object["spec"] = spec
 		copyFluxMetadata(vCluster, release, fluxReconcileAnnotations)

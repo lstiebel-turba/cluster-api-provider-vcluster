@@ -843,3 +843,16 @@ func TestFluxInstallerLeavesForeignHelmRelease(t *testing.T) {
 		t.Errorf("VCluster still there: %v %v", err, vc.Finalizers)
 	}
 }
+
+func TestFluxServiceAccount(t *testing.T) {
+	e := newFluxEnv(t, &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "ns"}}, fluxVCluster())
+	e.reconcile(2)
+	if _, ok, _ := unstructured.NestedString(e.helmRelease().Object, "spec", "serviceAccountName"); ok {
+		t.Errorf("serviceAccountName without --flux-service-account")
+	}
+	e.r.Options.Flux.ServiceAccountName = "vcluster-installer"
+	e.reconcile(1)
+	if sa, _, _ := unstructured.NestedString(e.helmRelease().Object, "spec", "serviceAccountName"); sa != "vcluster-installer" {
+		t.Errorf("serviceAccountName %q, want vcluster-installer", sa)
+	}
+}

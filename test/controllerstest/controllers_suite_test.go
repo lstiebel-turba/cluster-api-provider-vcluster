@@ -104,7 +104,7 @@ var _ = ginkgo.Describe("Vcluster Controller test", func() {
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			reconciler = &controllers.GenericReconciler{
-				Client:     fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(vCluster, secret).WithStatusSubresource(vCluster).Build(),
+				Client:     fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(vCluster, secret, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default"}}).WithStatusSubresource(vCluster).Build(),
 				HelmClient: hemlClient,
 				Scheme:     scheme,
 				ClientConfigGetter: &fakeConfigGetter{
@@ -165,7 +165,7 @@ var _ = ginkgo.Describe("Vcluster Controller test", func() {
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			reconciler = &controllers.GenericReconciler{
-				Client:     fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(vCluster, secret).WithStatusSubresource(vCluster).Build(),
+				Client:     fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(vCluster, secret, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default"}}).WithStatusSubresource(vCluster).Build(),
 				HelmClient: hemlClient,
 				Scheme:     scheme,
 				ClientConfigGetter: &fakeConfigGetter{

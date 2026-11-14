@@ -29,6 +29,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
@@ -60,6 +61,7 @@ type GenericReconciler struct {
 	ClientConfigGetter ClientConfigGetter
 	HTTPClientGetter   HTTPClientGetter
 	ControllerName     string
+	Options            Options
 	clusterKindExists  bool
 
 	New func() GenericVCluster
@@ -87,6 +89,16 @@ func (r *GenericReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ 
 		return ctrl.Result{}, nil
 	}
 
+	// only VClusters in selected namespaces
+	namespace := &corev1.Namespace{}
+	err = r.Client.Get(ctx, types.NamespacedName{Name: req.Namespace}, namespace)
+	if err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	if r.Options.NamespaceSelector != nil && !r.Options.NamespaceSelector.Matches(labels.Set(namespace.Labels)) {
+		return ctrl.Result{}, nil
+	}
+
 	// the owner Cluster, nil without Cluster API or before the Cluster controller set the
 	// owner reference
 	cluster, err := r.ownerCluster(ctx, vCluster)
@@ -97,11 +109,7 @@ func (r *GenericReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ 
 	// is deleting?
 	if vCluster.GetDeletionTimestamp() != nil {
 		// check if namespace is deleting
-		namespace := &corev1.Namespace{}
-		err := r.Client.Get(ctx, types.NamespacedName{Name: req.Namespace}, namespace)
-		if err != nil {
-			return ctrl.Result{}, nil
-		} else if namespace.DeletionTimestamp != nil {
+		if namespace.DeletionTimestamp != nil {
 			return ctrl.Result{}, RemoveFinalizer(ctx, r.Client, vCluster, CleanupFinalizer)
 		}
 
@@ -292,6 +300,9 @@ func (r *GenericReconciler) redeployIfNeeded(_ context.Context, vCluster Generic
 		if len(chartVersion) > 0 && chartVersion[0] == 'v' {
 			chartVersion = chartVersion[1:]
 		}
+	}
+	if chartVersion == "" && r.Options.RequireChartVersion {
+		return fmt.Errorf("spec.helmRelease.chart.version is required")
 	}
 
 	var values string

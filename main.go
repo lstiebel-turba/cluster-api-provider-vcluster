@@ -19,6 +19,7 @@ package main
 import (
 	"flag"
 	"os"
+	"strings"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -28,7 +29,10 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -61,12 +65,16 @@ func main() {
 	var enableLeaderElection bool
 	var probeAddr string
 	var namespace string
+	var namespaceSelector string
+	var requireChartVersion bool
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
-	flag.StringVar(&namespace, "namespace", "", "The namespace watched by the controller manager.")
+	flag.StringVar(&namespace, "namespace", "", "The namespaces watched by the controller manager, comma-separated. Empty watches all.")
+	flag.StringVar(&namespaceSelector, "namespace-selector", "", "Label selector a VCluster's namespace must match to be reconciled, for example turba-env.dev/environment.")
+	flag.BoolVar(&requireChartVersion, "require-chart-version", false, "Refuse a VCluster without spec.helmRelease.chart.version instead of installing the latest chart.")
 
 	opts := zap.Options{
 		Development: true,
@@ -77,10 +85,19 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
 	var namespaces map[string]cache.Config
-	if namespace != "" {
-		namespaces = map[string]cache.Config{
-			namespace: {},
+	for _, ns := range strings.Split(namespace, ",") {
+		if ns = strings.TrimSpace(ns); ns != "" {
+			if namespaces == nil {
+				namespaces = map[string]cache.Config{}
+			}
+			namespaces[ns] = cache.Config{}
 		}
+	}
+
+	selector, err := labels.Parse(namespaceSelector)
+	if err != nil {
+		setupLog.Error(err, "invalid --namespace-selector")
+		os.Exit(1)
 	}
 
 	mgr, err := manager.New(ctrl.GetConfigOrDie(), manager.Options{
@@ -97,6 +114,19 @@ func main() {
 		Cache: cache.Options{
 			DefaultNamespaces: namespaces,
 		},
+		// Read these straight from the API server: a cache would watch them in every namespace
+		// the manager watches, Secrets included.
+		Client: client.Options{
+			Cache: &client.CacheOptions{
+				DisableFor: []client.Object{
+					&corev1.Secret{},
+					&corev1.ConfigMap{},
+					&corev1.Service{},
+					&corev1.PersistentVolumeClaim{},
+					&corev1.Namespace{},
+				},
+			},
+		},
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
@@ -104,7 +134,10 @@ func main() {
 	}
 
 	ctx := ctrl.SetupSignalHandler()
-	if err := controllers.RegisterControllers(ctx, mgr); err != nil {
+	if err := controllers.RegisterControllers(ctx, mgr, controllers.Options{
+		NamespaceSelector:   selector,
+		RequireChartVersion: requireChartVersion,
+	}); err != nil {
 		setupLog.Error(err, "unable to register controllers")
 		os.Exit(1)
 	}

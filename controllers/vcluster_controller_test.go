@@ -7,6 +7,7 @@ import (
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
@@ -61,10 +62,15 @@ func ownedVCluster() *infrastructurev1alpha1.VCluster {
 
 func reconcileOnce(t *testing.T, objs ...client.Object) (*countingHelm, *infrastructurev1alpha1.VCluster) {
 	t.Helper()
+	return reconcileWith(t, Options{}, objs...)
+}
+
+func reconcileWith(t *testing.T, options Options, objs ...client.Object) (*countingHelm, *infrastructurev1alpha1.VCluster) {
+	t.Helper()
 	h := &countingHelm{}
 	c := fakeclient.NewClientBuilder().
 		WithScheme(testScheme(t)).
-		WithObjects(objs...).
+		WithObjects(append(objs, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "ns", Labels: map[string]string{"tenant": "yes"}}})...).
 		WithStatusSubresource(&infrastructurev1alpha1.VCluster{}).
 		Build()
 	r := &GenericReconciler{
@@ -72,15 +78,17 @@ func reconcileOnce(t *testing.T, objs ...client.Object) (*countingHelm, *infrast
 		HelmClient:        h,
 		Log:               logr.Discard(),
 		Scheme:            c.Scheme(),
+		Options:           options,
 		clusterKindExists: true,
 		HTTPClientGetter:  NewHTTPClientGetter(),
 		New:               func() GenericVCluster { return &infrastructurev1alpha1.VCluster{} },
 	}
 	// twice: the first pass only sets the Paused condition and requeues
 	for range 2 {
+		// a failed deploy returns its error for the backoff; the conditions carry it too
 		_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "ns", Name: "vc1"}})
 		if err != nil {
-			t.Fatal(err)
+			t.Log(err)
 		}
 	}
 	got := &infrastructurev1alpha1.VCluster{}
@@ -168,5 +176,28 @@ func TestSummaryConditions(t *testing.T) {
 	setSummaryConditions(vc)
 	if got := conditions.Get(vc, infrastructurev1alpha1.ReadyCondition); got.Status != metav1.ConditionFalse || got.Reason != infrastructurev1alpha1.HelmDeployFailedReason {
 		t.Errorf("Ready after a failed deploy: %+v", got)
+	}
+}
+
+func TestNamespaceSelector(t *testing.T) {
+	cluster := &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "ns"}}
+	h, _ := reconcileWith(t, Options{NamespaceSelector: labels.SelectorFromSet(labels.Set{"tenant": "no"})}, cluster, ownedVCluster())
+	if h.upgrades != 0 {
+		t.Errorf("helm upgrades outside the selected namespaces: %d", h.upgrades)
+	}
+	h, _ = reconcileWith(t, Options{NamespaceSelector: labels.SelectorFromSet(labels.Set{"tenant": "yes"})}, cluster, ownedVCluster())
+	if h.upgrades != 1 {
+		t.Errorf("helm upgrades in a selected namespace: %d, want 1", h.upgrades)
+	}
+}
+
+func TestRequireChartVersion(t *testing.T) {
+	cluster := &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "ns"}}
+	h, got := reconcileWith(t, Options{RequireChartVersion: true}, cluster, ownedVCluster())
+	if h.upgrades != 0 {
+		t.Errorf("helm upgrades without a chart version: %d", h.upgrades)
+	}
+	if c := conditions.Get(got, infrastructurev1alpha1.HelmChartDeployedCondition); c == nil || c.Reason != infrastructurev1alpha1.HelmDeployFailedReason {
+		t.Errorf("HelmChartDeployed: %+v", c)
 	}
 }

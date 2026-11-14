@@ -7,13 +7,23 @@ import (
 	"github.com/loft-sh/cluster-api-provider-vcluster/pkg/helm"
 	"github.com/loft-sh/cluster-api-provider-vcluster/pkg/util/kubeconfighelper"
 	"github.com/loft-sh/log/logr"
+	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	controlplanev1alpha1 "github.com/loft-sh/cluster-api-provider-vcluster/api/controlplane/v1alpha1"
 	infrastructurev1alpha1 "github.com/loft-sh/cluster-api-provider-vcluster/api/infrastructure/v1alpha1"
 )
 
-func RegisterControllers(ctx context.Context, mgr manager.Manager) error {
+// Options configures the VCluster controllers.
+type Options struct {
+	// NamespaceSelector selects the namespaces whose VClusters are reconciled. Nil selects all.
+	NamespaceSelector labels.Selector
+
+	// RequireChartVersion refuses a VCluster without a chart version.
+	RequireChartVersion bool
+}
+
+func RegisterControllers(ctx context.Context, mgr manager.Manager, options Options) error {
 	rawConfig, err := kubeconfighelper.ConvertRestConfigToRawConfig(mgr.GetConfig())
 	if err != nil {
 		return fmt.Errorf("unable to get config: %w", err)
@@ -37,6 +47,7 @@ func RegisterControllers(ctx context.Context, mgr manager.Manager) error {
 		Scheme:             mgr.GetScheme(),
 		ClientConfigGetter: NewClientConfigGetter(),
 		HTTPClientGetter:   NewHTTPClientGetter(),
+		Options:            options,
 		New: func() GenericVCluster {
 			return &infrastructurev1alpha1.VCluster{}
 		},
@@ -54,6 +65,7 @@ func RegisterControllers(ctx context.Context, mgr manager.Manager) error {
 		Scheme:             mgr.GetScheme(),
 		ClientConfigGetter: NewClientConfigGetter(),
 		HTTPClientGetter:   NewHTTPClientGetter(),
+		Options:            options,
 		New: func() GenericVCluster {
 			return &controlplanev1alpha1.VCluster{}
 		},

@@ -66,6 +66,12 @@ test: manifests generate fmt vet envtest ## Run tests.
 e2e-kwok: ## End-to-end test of the flux installer on a kwok cluster (no Docker; hack/e2e-kwok.sh).
 	hack/e2e-kwok.sh
 
+INSTALLER ?= helm
+
+.PHONY: e2e-kind
+e2e-kind: ## End-to-end test on kind with a real vCluster (INSTALLER=helm|flux; hack/e2e-kind.sh).
+	./hack/e2e-kind.sh $(INSTALLER)
+
 ##@ Build
 
 .PHONY: build

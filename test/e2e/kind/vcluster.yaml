@@ -1,0 +1,107 @@
+# vCluster values of the kind e2e (hack/e2e-kind.sh): Turbacharger's production tenant values
+# (TurbaAI/my-turba-env turbacharger/platform/k8s/tenant/vcluster.yaml), stripped to what runs on
+# kind. __TENANT__ is the vCluster's name, as there. Removed, and why:
+# - backingStore.etcd...persistence.volumeClaim.storageClass (__ETCD_STORAGE_CLASS__, Hyperdisk
+#   HA on the host): kind's default class (local-path) instead.
+# - backingStore.etcd...scheduling.nodeSelector and controlPlane.statefulSet.scheduling
+#   (cloud.google.com/compute-class: control-plane): no ComputeClass on kind.
+# - networking.replicateServices.fromHost: the host's observability gateway, BFF and swapper
+#   Services, which kind doesn't have.
+# Kept as in production: the etcd backing store (StatefulSet <name>-etcd, its priority class
+# turba-env-tenant-system, which the script creates), the OSS syncer as Deployment <name> without
+# a disk, the virtual scheduler, the sync rules (the script labels the kind node
+# turba-env.dev/tenant=<name>), the ServiceMonitor (the script installs its CRD only), the
+# localhost SAN and exportKubeConfig.
+
+controlPlane:
+  distro:
+    k8s:
+      enabled: true
+      image:
+        tag: v1.36.5
+      scheduler:
+        enabled: true
+  backingStore:
+    etcd:
+      deploy:
+        enabled: true
+        statefulSet:
+          highAvailability:
+            replicas: 1
+          resources:
+            requests:
+              cpu: 400m
+              memory: 1Gi
+          persistence:
+            volumeClaim:
+              enabled: true
+              size: 10Gi
+          scheduling:
+            priorityClassName: turba-env-tenant-system
+  statefulSet:
+    image:
+      registry: ghcr.io
+      repository: loft-sh/vcluster-oss
+    persistence:
+      volumeClaim:
+        enabled: false
+    resources:
+      requests:
+        cpu: 1200m
+        memory: 2560Mi
+  serviceMonitor:
+    enabled: true
+  proxy:
+    extraSANs:
+      - localhost
+
+sync:
+  fromHost:
+    nodes:
+      enabled: true
+      syncBackChanges: false
+      selector:
+        labels:
+          turba-env.dev/tenant: __TENANT__
+    priorityClasses:
+      enabled: true
+    runtimeClasses:
+      enabled: true
+    storageClasses:
+      enabled: true
+      selector:
+        matchLabels:
+          turba-env.dev/tenant-storage: "true"
+  toHost:
+    pods:
+      enabled: true
+      rewriteHosts:
+        initContainer:
+          resources:
+            requests:
+              cpu: "0"
+              memory: "0"
+      enforceTolerations:
+        - "turba-env.dev/tenant=__TENANT__:NoSchedule"
+        - "cloud.google.com/compute-class:NoSchedule"
+    ingresses:
+      enabled: false
+    serviceAccounts:
+      enabled: true
+    priorityClasses:
+      enabled: false
+
+policies:
+  resourceQuota:
+    enabled: false
+  limitRange:
+    enabled: false
+  networkPolicy:
+    enabled: false
+
+exportKubeConfig:
+  context: vcluster-__TENANT__
+  additionalSecrets:
+    - name: vc-__TENANT__-host
+      server: https://__TENANT__.vcluster-__TENANT__
+      context: vcluster-__TENANT__

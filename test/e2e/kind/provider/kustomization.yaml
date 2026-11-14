@@ -1,0 +1,21 @@
+# The provider as config/default deploys it, with the image hack/e2e-kind.sh built and loaded
+# into kind (never pulled).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../../../config/default
+
+images:
+  - name: ghcr.io/loft-sh/cluster-api-provider-vcluster
+    newName: capvc.local/cluster-api-provider-vcluster
+    newTag: e2e
+
+patches:
+  - target:
+      kind: Deployment
+      name: capv-controller-manager
+    patch: |
+      - op: replace
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Never

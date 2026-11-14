@@ -7,7 +7,6 @@ import (
 	"github.com/loft-sh/cluster-api-provider-vcluster/pkg/helm"
 	"github.com/loft-sh/cluster-api-provider-vcluster/pkg/util/kubeconfighelper"
 	"github.com/loft-sh/log/logr"
-	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	controlplanev1alpha1 "github.com/loft-sh/cluster-api-provider-vcluster/api/controlplane/v1alpha1"
@@ -59,22 +58,6 @@ func RegisterControllers(ctx context.Context, mgr manager.Manager) error {
 			return &controlplanev1alpha1.VCluster{}
 		},
 	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to create controller: %w", err)
-	}
-
-	// vNodeMachine
-	if err = (&VNodeMachineReconciler{
-		Client: mgr.GetClient(),
-		Log:    log,
-	}).SetupWithManager(ctx, mgr, controller.Options{}); err != nil {
-		return fmt.Errorf("unable to create controller: %w", err)
-	}
-
-	// vNodeCluster
-	if err = (&VNodeClusterReconciler{
-		Client: mgr.GetClient(),
-		Log:    log,
-	}).SetupWithManager(ctx, mgr, controller.Options{}); err != nil {
 		return fmt.Errorf("unable to create controller: %w", err)
 	}
 

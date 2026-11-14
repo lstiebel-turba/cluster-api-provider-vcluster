@@ -13,8 +13,14 @@
 # Scenario: a Cluster and its VCluster (the vCluster chart from VCLUSTER_CHART_REPO) ->
 # Cluster API owns the VCluster -> the provider writes the HelmRepository and the HelmRelease
 # -> helm-controller installs the chart (kwok's pods turn Ready) -> HelmChartDeployed True ->
-# Cluster paused: HelmRelease suspended -> unpaused: resumed -> Cluster deleted: HelmRelease
-# deleted, the Helm release uninstalled, the VCluster's finalizer gone.
+# the VCluster's labels and reconcile requests reach the HelmRelease (and helm-controller), also
+# when they change -> spec.helmRelease.driftDetection overrides --flux-drift-detection ->
+# values the API server refuses: HelmRelease Stalled, the VCluster Failed; fixed: deployed
+# again -> Cluster paused: HelmRelease suspended within seconds -> unpaused: resumed within
+# seconds -> Cluster deleted: HelmRelease deleted, the Helm release uninstalled, the VCluster's
+# finalizer gone. Alongside, in namespace e2e-shared, a second provider process with
+# --flux-repository-name: its VCluster uses the shared HelmRepository, which the provider
+# neither owns nor deletes.
 # Not covered: the vCluster itself (its pods only look Running on kwok): no /readyz, no
 # vc-<name> Secret, so KubeconfigReady, ControlPlaneInitialized and Ready stay False.
 #
@@ -29,6 +35,14 @@ LOGS="$CACHE/logs"
 CLUSTER="${E2E_KWOK_CLUSTER:-capvc-e2e-kwok}"
 NS=e2e
 NAME=vc1
+NS_SHARED=e2e-shared # the second provider's, with --flux-repository-name=$SHARED_REPO
+NAME_SHARED=vc2
+SHARED_REPO=shared
+# the chart's values: no volume (kwok has no storage). BAD_VALUES give the StatefulSet a label
+# key the API server refuses: a failed revision, rolled back, until the retries run out
+# (Stalled). Values the chart's schema refuses fail before a revision and never stall.
+VALUES='{controlPlane: {statefulSet: {persistence: {volumeClaim: {enabled: false}}}}}'
+BAD_VALUES="{controlPlane: {statefulSet: {labels: {'not a label key': x}, persistence: {volumeClaim: {enabled: false}}}}}"
 export KWOK_WORKDIR="$CACHE/work"
 
 # hack/e2e-kwok.env; the environment wins
@@ -178,20 +192,25 @@ HR=helmreleases.helm.toolkit.fluxcd.io
 HREPO=helmrepositories.source.toolkit.fluxcd.io
 CL=clusters.cluster.x-k8s.io
 
-# jp KIND NAME JSONPATH: a field of an object in $NS, empty if the object is missing
-jp() { k get "$1" -n "$NS" "$2" -o "jsonpath=$3" 2>/dev/null || true; }
+# jp KIND NAME JSONPATH: a field of an object in $NS (or $IN_NS), empty if the object is missing
+jp() { k get "$1" -n "${IN_NS:-$NS}" "$2" -o "jsonpath=$3" 2>/dev/null || true; }
 # expect KIND NAME JSONPATH WANT: the field equals WANT
 expect() { [[ "$(jp "$1" "$2" "$3")" == "$4" ]]; }
+# contains KIND NAME JSONPATH WANT: the field contains WANT
+contains() { [[ "$(jp "$1" "$2" "$3")" == *"$4"* ]]; }
 # missing KIND NAME: the object no longer exists
-missing() { [[ -z "$(k get "$1" -n "$NS" "$2" --ignore-not-found -o name)" ]]; }
+missing() { [[ -z "$(k get "$1" -n "${IN_NS:-$NS}" "$2" --ignore-not-found -o name)" ]]; }
 # no_release_secret: Helm keeps no release record of $NAME (Secret metadata only)
 no_release_secret() { [[ -z "$(k get secret -n "$NS" -l owner=helm,name="$NAME" -o name)" ]]; }
 condition() { expect "$1" "$2" "{.status.conditions[?(@.type==\"$3\")].status}" "$4"; }
 
 dump() {
   log "state at the failure:"
-  k get "$CL,$VC,$HREPO,$HR,deploy,pods" -n "$NS" -o wide >&2 || true
-  k get "$VC,$HR" -n "$NS" -o yaml >"$LOGS/objects.yaml" 2>&1 || true
+  local ns
+  for ns in "$NS" "$NS_SHARED"; do
+    k get "$CL,$VC,$HREPO,$HR,deploy,pods" -n "$ns" -o wide >&2 || true
+  done
+  k get "$VC,$HR,$HREPO" -A -o yaml >"$LOGS/objects.yaml" 2>&1 || true
   for f in "$LOGS"/*.log; do
     echo "--- tail $f" >&2
     tail -n 15 "$f" >&2
@@ -210,7 +229,8 @@ alive() {
   done
 }
 
-# wait_for DESCRIPTION TIMEOUT_SECONDS CHECK...: CHECK until it succeeds, or fail
+# wait_for DESCRIPTION TIMEOUT_SECONDS CHECK...: CHECK until it succeeds, or fail; every
+# ${POLL:-1}s (a fraction for a timing bound)
 wait_for() {
   local desc="$1" timeout="$2" t0=$SECONDS
   shift 2
@@ -220,7 +240,7 @@ wait_for() {
       dump
       exit 1
     fi
-    sleep 1
+    sleep "${POLL:-1}"
   done
   log "ok: $desc ($((SECONDS - t0))s)"
 }
@@ -280,6 +300,7 @@ EOF
   k wait --for=condition=Established --timeout=60s crd --all >/dev/null
   k create namespace flux-system >/dev/null
   k create namespace "$NS" >/dev/null
+  k create namespace "$NS_SHARED" >/dev/null
   log "CRDs established: Flux, Cluster API, the provider's"
 
   local storage certs
@@ -304,25 +325,26 @@ EOF
     --health-addr=127.0.0.1:0 --diagnostics-address=127.0.0.1:0 --insecure-diagnostics
   start provider "$BIN/capvc-manager" --installer=flux --namespace="$NS" \
     --metrics-bind-address=0 --health-probe-bind-address=0
+  start provider-shared "$BIN/capvc-manager" --installer=flux --namespace="$NS_SHARED" \
+    --flux-repository-name="$SHARED_REPO" --metrics-bind-address=0 --health-probe-bind-address=0
 
-  # 1. a Cluster and its VCluster
+  # 1. a Cluster and its VCluster, with a tenant label and a reconcile request
   k apply -n "$NS" -f - >/dev/null <<EOF
 apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
 kind: VCluster
 metadata:
   name: $NAME
+  labels:
+    turba-env.dev/tenant: t1
+  annotations:
+    reconcile.fluxcd.io/requestedAt: r1
 spec:
   helmRelease:
     chart:
       repo: $VCLUSTER_CHART_REPO
       name: vcluster
       version: "$VCLUSTER_CHART_VERSION"
-    values: |
-      controlPlane:
-        statefulSet:
-          persistence:
-            volumeClaim:
-              enabled: false
+    values: '$VALUES'
 ---
 apiVersion: cluster.x-k8s.io/v1beta2
 kind: Cluster
@@ -339,6 +361,46 @@ spec:
     name: $NAME
 EOF
   log "created Cluster and VCluster $NS/$NAME"
+
+  # the shared HelmRepository someone else wrote, with a field the provider doesn't write; a
+  # Cluster and its VCluster for the second provider
+  k apply -n "$NS_SHARED" -f - >/dev/null <<EOF
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: $SHARED_REPO
+spec:
+  url: $VCLUSTER_CHART_REPO
+  interval: 1h
+  timeout: 90s
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+kind: VCluster
+metadata:
+  name: $NAME_SHARED
+spec:
+  helmRelease:
+    chart:
+      repo: $VCLUSTER_CHART_REPO
+      name: vcluster
+      version: "$VCLUSTER_CHART_VERSION"
+    values: '$VALUES'
+---
+apiVersion: cluster.x-k8s.io/v1beta2
+kind: Cluster
+metadata:
+  name: $NAME_SHARED
+spec:
+  infrastructureRef:
+    apiGroup: infrastructure.cluster.x-k8s.io
+    kind: VCluster
+    name: $NAME_SHARED
+  controlPlaneRef:
+    apiGroup: infrastructure.cluster.x-k8s.io
+    kind: VCluster
+    name: $NAME_SHARED
+EOF
+  log "created HelmRepository $NS_SHARED/$SHARED_REPO, Cluster and VCluster $NS_SHARED/$NAME_SHARED"
 
   wait_for "Cluster API owns the VCluster" 60 \
     expect "$VC" "$NAME" '{.metadata.ownerReferences[?(@.kind=="Cluster")].name}' "$NAME"
@@ -367,15 +429,70 @@ EOF
   check "the chart's Deployment is there" expect deploy "$NAME" '{.metadata.name}' "$NAME"
   wait_for "VCluster HelmChartDeployed True" 60 condition "$VC" "$NAME" HelmChartDeployed True
 
-  # 4. pause and unpause the Cluster
-  k patch "$CL" -n "$NS" "$NAME" --type merge -p '{"spec":{"paused":true}}' >/dev/null
-  wait_for "Cluster paused: VCluster Paused True" 60 condition "$VC" "$NAME" Paused True
-  wait_for "Cluster paused: HelmRelease suspended" 60 expect "$HR" "$NAME" '{.spec.suspend}' true
-  k patch "$CL" -n "$NS" "$NAME" --type merge -p '{"spec":{"paused":false}}' >/dev/null
-  wait_for "Cluster unpaused: VCluster Paused False" 60 condition "$VC" "$NAME" Paused False
-  wait_for "Cluster unpaused: HelmRelease resumed" 60 expect "$HR" "$NAME" '{.spec.suspend}' false
+  # 4. the VCluster's labels and reconcile requests on the HelmRelease (requestedAt and labels
+  # on its HelmRepository too); helm-controller handles the request
+  check "HelmRelease label turba-env.dev/tenant" expect "$HR" "$NAME" '{.metadata.labels.turba-env\.dev/tenant}' t1
+  check "HelmRelease requestedAt" expect "$HR" "$NAME" '{.metadata.annotations.reconcile\.fluxcd\.io/requestedAt}' r1
+  check "HelmRepository label turba-env.dev/tenant" expect "$HREPO" "$NAME" '{.metadata.labels.turba-env\.dev/tenant}' t1
+  wait_for "helm-controller handled requestedAt r1" 60 expect "$HR" "$NAME" '{.status.lastHandledReconcileAt}' r1
+  k label "$VC" -n "$NS" "$NAME" --overwrite turba-env.dev/tenant=t2 team=a >/dev/null
+  k annotate "$VC" -n "$NS" "$NAME" --overwrite reconcile.fluxcd.io/requestedAt=r2 >/dev/null
+  wait_for "changed label on the HelmRelease" 30 expect "$HR" "$NAME" '{.metadata.labels.turba-env\.dev/tenant}/{.metadata.labels.team}' t2/a
+  wait_for "changed label on the HelmRepository" 30 expect "$HREPO" "$NAME" '{.metadata.labels.turba-env\.dev/tenant}' t2
+  wait_for "helm-controller handled requestedAt r2" 60 expect "$HR" "$NAME" '{.status.lastHandledReconcileAt}' r2
+  check "HelmRepository requestedAt r2" expect "$HREPO" "$NAME" '{.metadata.annotations.reconcile\.fluxcd\.io/requestedAt}' r2
+  k label "$VC" -n "$NS" "$NAME" team- >/dev/null
+  wait_for "removed label gone from the HelmRelease" 30 expect "$HR" "$NAME" '{.metadata.labels.team}' ""
 
-  # 5. delete the Cluster: Cluster API deletes the VCluster, the provider the HelmRelease
+  # 5. spec.helmRelease.driftDetection over --flux-drift-detection (enabled), and back
+  k patch "$VC" -n "$NS" "$NAME" --type merge -p '{"spec":{"helmRelease":{"driftDetection":"warn"}}}' >/dev/null
+  wait_for "VCluster driftDetection warn on the HelmRelease" 30 expect "$HR" "$NAME" '{.spec.driftDetection.mode}' warn
+  k patch "$VC" -n "$NS" "$NAME" --type json -p '[{"op":"remove","path":"/spec/helmRelease/driftDetection"}]' >/dev/null
+  wait_for "the flag's driftDetection enabled again" 30 expect "$HR" "$NAME" '{.spec.driftDetection.mode}' enabled
+  wait_for "HelmRelease Ready after the drift detection changes" 120 condition "$HR" "$NAME" Ready True
+
+  # 6. values the API server refuses: helm-controller gives up (Stalled), the VCluster fails;
+  # the values fixed, it recovers
+  k patch "$VC" -n "$NS" "$NAME" --type merge \
+    -p "{\"spec\":{\"helmRelease\":{\"values\":\"$BAD_VALUES\"}}}" >/dev/null
+  wait_for "bad values: HelmRelease Stalled" 300 condition "$HR" "$NAME" Stalled True
+  wait_for "bad values: VCluster HelmChartDeployed False, HelmDeployFailed" 60 \
+    expect "$VC" "$NAME" '{.status.conditions[?(@.type=="HelmChartDeployed")].reason}' HelmDeployFailed
+  check "bad values: the condition says stalled" \
+    contains "$VC" "$NAME" '{.status.conditions[?(@.type=="HelmChartDeployed")].message}' "HelmRelease stalled"
+  wait_for "bad values: VCluster phase Failed" 30 expect "$VC" "$NAME" '{.status.phase}' Failed
+  k patch "$VC" -n "$NS" "$NAME" --type merge \
+    -p "{\"spec\":{\"helmRelease\":{\"values\":\"$VALUES\"}}}" >/dev/null
+  wait_for "values fixed: HelmRelease Ready" 300 condition "$HR" "$NAME" Ready True
+  wait_for "values fixed: VCluster HelmChartDeployed True" 60 condition "$VC" "$NAME" HelmChartDeployed True
+  wait_for "values fixed: VCluster phase no longer Failed" 30 expect "$VC" "$NAME" '{.status.phase}' Pending
+
+  # 7. pause and unpause the Cluster: the Cluster watch suspends and resumes the HelmRelease
+  # within seconds (a paused VCluster is never requeued: only the watch reaches it to unpause)
+  k patch "$CL" -n "$NS" "$NAME" --type merge -p '{"spec":{"paused":true}}' >/dev/null
+  POLL=0.25 wait_for "Cluster paused: HelmRelease suspended within 5s" 5 expect "$HR" "$NAME" '{.spec.suspend}' true
+  wait_for "Cluster paused: VCluster Paused True" 60 condition "$VC" "$NAME" Paused True
+  k patch "$CL" -n "$NS" "$NAME" --type merge -p '{"spec":{"paused":false}}' >/dev/null
+  POLL=0.25 wait_for "Cluster unpaused: HelmRelease resumed within 5s" 5 expect "$HR" "$NAME" '{.spec.suspend}' false
+  wait_for "Cluster unpaused: VCluster Paused False" 60 condition "$VC" "$NAME" Paused False
+
+  # 8. the shared HelmRepository (--flux-repository-name): used, not owned, kept on delete
+  IN_NS=$NS_SHARED wait_for "shared: VCluster HelmChartDeployed True" 300 \
+    condition "$VC" "$NAME_SHARED" HelmChartDeployed True
+  IN_NS=$NS_SHARED check "shared: HelmRelease sourceRef" \
+    expect "$HR" "$NAME_SHARED" '{.spec.chart.spec.sourceRef.name}' "$SHARED_REPO"
+  IN_NS=$NS_SHARED check "shared: no HelmRepository of the VCluster's own" missing "$HREPO" "$NAME_SHARED"
+  IN_NS=$NS_SHARED check "shared: HelmRepository not owned" \
+    expect "$HREPO" "$SHARED_REPO" '{.metadata.ownerReferences}' ""
+  IN_NS=$NS_SHARED check "shared: HelmRepository keeps its own timeout" \
+    expect "$HREPO" "$SHARED_REPO" '{.spec.timeout}' 90s
+  k delete "$CL" -n "$NS_SHARED" "$NAME_SHARED" --wait=false >/dev/null
+  IN_NS=$NS_SHARED wait_for "shared: HelmRelease deleted" 180 missing "$HR" "$NAME_SHARED"
+  IN_NS=$NS_SHARED wait_for "shared: VCluster gone" 60 missing "$VC" "$NAME_SHARED"
+  IN_NS=$NS_SHARED check "shared: HelmRepository still there" \
+    expect "$HREPO" "$SHARED_REPO" '{.metadata.name}' "$SHARED_REPO"
+
+  # 9. delete the Cluster: Cluster API deletes the VCluster, the provider the HelmRelease
   k delete "$CL" -n "$NS" "$NAME" --wait=false >/dev/null
   wait_for "HelmRelease deleted" 180 missing "$HR" "$NAME"
   wait_for "Helm release uninstalled (no release Secret)" 60 \

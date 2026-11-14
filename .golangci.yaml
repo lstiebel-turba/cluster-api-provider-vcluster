@@ -39,9 +39,9 @@ linters:
     exhaustive:
       check:
         - switch
-        - map
+        - mapliteral
       default-signifies-exhaustive: true
-      ignore-enum-types: ResourceName|Atom
+      ignore-types: ["ResourceName|Atom"]
     importas:
       alias:
         - pkg: k8s\.io/api/(\w+)/(v[\w\d]+)

@@ -77,7 +77,7 @@ func main() {
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
 	flag.StringVar(&namespace, "namespace", "", "The namespaces watched by the controller manager, comma-separated. Empty watches all.")
-	flag.StringVar(&namespaceSelector, "namespace-selector", "", "Label selector a VCluster's namespace must match to be reconciled, for example turba-env.dev/environment.")
+	flag.StringVar(&namespaceSelector, "namespace-selector", "", "Label selector a VCluster's namespace must match to be reconciled, for example turba-env.dev/tenant.")
 	flag.BoolVar(&requireChartVersion, "require-chart-version", false, "Refuse a VCluster without spec.helmRelease.chart.version instead of installing the latest chart.")
 	flag.StringVar(&installer, "installer", "helm", "The installer of a VCluster without spec.helmRelease.installer: helm (the helm CLI) or flux (a Flux HelmRelease).")
 	flag.StringVar(&fluxRepositoryName, "flux-repository-name", "", "flux installer: a HelmRepository shared by a namespace's VClusters. Empty: one per VCluster.")

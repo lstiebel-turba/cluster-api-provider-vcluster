@@ -7,3 +7,6 @@
 - op: add
   path: /spec/template/spec/containers/0/args/-
   value: --flux-drift-detection=${CAPVC_FLUX_DRIFT_DETECTION:=enabled}
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --flux-service-account=${CAPVC_FLUX_SERVICE_ACCOUNT:=}

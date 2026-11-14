@@ -168,9 +168,11 @@ Cluster API Operator needs one:
 | `CAPVC_WATCH_NAMESPACES` | `--namespace` | empty: all |
 | `CAPVC_NAMESPACE_SELECTOR` | `--namespace-selector` | empty: all |
 | `CAPVC_REQUIRE_CHART_VERSION` | `--require-chart-version` | `false` |
+| `CAPVC_CONCURRENCY` | `--concurrency` | `4` |
 | `CAPVC_FLUX_REPOSITORY_NAME` (flux assets) | `--flux-repository-name` | empty: one HelmRepository per VCluster |
 | `CAPVC_FLUX_REPOSITORY_PROVIDER` (flux assets) | `--flux-repository-provider` | empty |
 | `CAPVC_FLUX_DRIFT_DETECTION` (flux assets) | `--flux-drift-detection` | `enabled` |
+| `CAPVC_FLUX_SERVICE_ACCOUNT` (flux assets) | `--flux-service-account` | empty: helm-controller's own account |
 
 clusterctl, with the fork in `~/.config/cluster-api/clusterctl.yaml`:
 

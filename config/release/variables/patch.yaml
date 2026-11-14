@@ -7,3 +7,6 @@
 - op: add
   path: /spec/template/spec/containers/0/args/-
   value: --require-chart-version=${CAPVC_REQUIRE_CHART_VERSION:=false}
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --concurrency=${CAPVC_CONCURRENCY:=4}

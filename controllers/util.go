@@ -9,10 +9,9 @@ import (
 	"github.com/go-logr/logr"
 	infrastructurev1alpha1 "github.com/loft-sh/cluster-api-provider-vcluster/api/infrastructure/v1alpha1"
 	"github.com/loft-sh/cluster-api-provider-vcluster/pkg/helm"
-	"github.com/loft-sh/cluster-api-provider-vcluster/pkg/util/conditions"
-	"github.com/loft-sh/cluster-api-provider-vcluster/pkg/util/patch"
 	corev1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -21,6 +20,10 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/clientcmd/api"
+	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
+	"sigs.k8s.io/cluster-api/util/annotations"
+	"sigs.k8s.io/cluster-api/util/conditions"
+	"sigs.k8s.io/cluster-api/util/patch"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -122,21 +125,15 @@ func kindExists(config *rest.Config, groupVersionKind schema.GroupVersionKind) (
 	return false, nil
 }
 
-func patchCluster(ctx context.Context, patchHelper *patch.Helper, vCluster conditions.Setter, options ...patch.Option) error {
-	// Always update the readyCondition by summarizing the state of other conditions.
-	conditions.SetSummary(vCluster,
-		conditions.WithConditions(
-			infrastructurev1alpha1.KubeconfigReadyCondition,
-			infrastructurev1alpha1.ControlPlaneInitializedCondition,
-		),
-	)
-
+func patchCluster(ctx context.Context, patchHelper *patch.Helper, vCluster GenericVCluster, options ...patch.Option) error {
 	// Patch the object, ignoring conflicts on the conditions owned by this controller.
 	// Also, if requested, we are adding additional options like e.g. Patch ObservedGeneration when issuing the
 	// patch at the end of the reconcile loop.
 	options = append(options,
-		patch.WithOwnedConditions{Conditions: []infrastructurev1alpha1.ConditionType{
+		patch.WithOwnedConditions{Conditions: []string{
 			infrastructurev1alpha1.ReadyCondition,
+			infrastructurev1alpha1.AvailableCondition,
+			infrastructurev1alpha1.PausedCondition,
 			infrastructurev1alpha1.KubeconfigReadyCondition,
 			infrastructurev1alpha1.ControlPlaneInitializedCondition,
 			infrastructurev1alpha1.HelmChartDeployedCondition,
@@ -144,6 +141,115 @@ func patchCluster(ctx context.Context, patchHelper *patch.Helper, vCluster condi
 		}},
 	)
 	return patchHelper.Patch(ctx, vCluster, options...)
+}
+
+// setSummaryConditions sets Ready (the VCluster as an infrastructure cluster) and Available (as
+// a control plane) from the other conditions and the readyz check.
+func setSummaryConditions(vCluster GenericVCluster) {
+	summary := metav1.Condition{
+		Status: metav1.ConditionTrue,
+		Reason: infrastructurev1alpha1.SucceededReason,
+	}
+	for _, conditionType := range []string{
+		infrastructurev1alpha1.HelmChartDeployedCondition,
+		infrastructurev1alpha1.ControlPlaneInitializedCondition,
+		infrastructurev1alpha1.KubeconfigReadyCondition,
+		infrastructurev1alpha1.InfrastructureClusterSyncedCondition,
+	} {
+		condition := conditions.Get(vCluster, conditionType)
+		switch {
+		case condition == nil && conditionType == infrastructurev1alpha1.InfrastructureClusterSyncedCondition:
+			continue
+		case condition == nil:
+			summary = metav1.Condition{
+				Status:  metav1.ConditionFalse,
+				Reason:  infrastructurev1alpha1.NotReadyReason,
+				Message: "waiting for " + conditionType,
+			}
+		case condition.Status != metav1.ConditionTrue:
+			summary = metav1.Condition{
+				Status:  metav1.ConditionFalse,
+				Reason:  condition.Reason,
+				Message: conditionType + ": " + condition.Message,
+			}
+		default:
+			continue
+		}
+		break
+	}
+	if summary.Status == metav1.ConditionTrue && !vCluster.GetStatus().Ready {
+		summary = metav1.Condition{
+			Status:  metav1.ConditionFalse,
+			Reason:  infrastructurev1alpha1.NotReadyReason,
+			Message: "the vcluster API server is not ready",
+		}
+	}
+
+	for _, conditionType := range []string{infrastructurev1alpha1.ReadyCondition, infrastructurev1alpha1.AvailableCondition} {
+		condition := summary
+		condition.Type = conditionType
+		conditions.Set(vCluster, condition)
+	}
+}
+
+// isFailureReason tells a failed reconcile from one still waiting.
+func isFailureReason(reason string) bool {
+	return reason == infrastructurev1alpha1.HelmDeployFailedReason || reason == infrastructurev1alpha1.PatchFailedReason
+}
+
+func markTrue(vCluster GenericVCluster, conditionType string) {
+	conditions.Set(vCluster, metav1.Condition{
+		Type:   conditionType,
+		Status: metav1.ConditionTrue,
+		Reason: infrastructurev1alpha1.SucceededReason,
+	})
+}
+
+func initialization(vCluster GenericVCluster) *infrastructurev1alpha1.VClusterInitializationStatus {
+	if vCluster.GetStatus().Initialization == nil {
+		vCluster.GetStatus().Initialization = &infrastructurev1alpha1.VClusterInitializationStatus{}
+	}
+	return vCluster.GetStatus().Initialization
+}
+
+// clusterOwnerRef returns the owner reference to the Cluster API Cluster. It does not require
+// controller=true: Cluster API stopped setting it on infrastructure and control plane objects.
+func clusterOwnerRef(obj metav1.Object) *metav1.OwnerReference {
+	for _, ref := range obj.GetOwnerReferences() {
+		gv, err := schema.ParseGroupVersion(ref.APIVersion)
+		if err != nil {
+			continue
+		}
+		if ref.Kind == "Cluster" && gv.Group == clusterv1.GroupVersion.Group {
+			return &ref
+		}
+	}
+	return nil
+}
+
+// ownerCluster returns the owning Cluster, or nil when there is none (yet).
+func (r *GenericReconciler) ownerCluster(ctx context.Context, vCluster GenericVCluster) (*clusterv1.Cluster, error) {
+	ref := clusterOwnerRef(vCluster)
+	if !r.clusterKindExists || ref == nil {
+		return nil, nil
+	}
+	cluster := &clusterv1.Cluster{}
+	err := r.Client.Get(ctx, types.NamespacedName{Namespace: vCluster.GetNamespace(), Name: ref.Name}, cluster)
+	if kerrors.IsNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get owner cluster: %w", err)
+	}
+	return cluster, nil
+}
+
+// isPaused tells if the Cluster or the VCluster itself is paused.
+func isPaused(cluster *clusterv1.Cluster, vCluster GenericVCluster) bool {
+	if cluster != nil {
+		return annotations.IsPaused(cluster, vCluster)
+	}
+	return annotations.HasPaused(vCluster)
 }
 
 func RemoveFinalizer(ctx context.Context, client client.Client, obj client.Object, finalizer string) error {

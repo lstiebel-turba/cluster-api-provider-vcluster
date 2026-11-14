@@ -22,12 +22,12 @@ import (
 )
 
 // GetConditions returns the set of conditions for this object.
-func (v *VCluster) GetConditions() infrastructurev1alpha1.Conditions {
+func (v *VCluster) GetConditions() []metav1.Condition {
 	return v.Status.Conditions
 }
 
 // SetConditions sets the conditions on this object.
-func (v *VCluster) SetConditions(conditions infrastructurev1alpha1.Conditions) {
+func (v *VCluster) SetConditions(conditions []metav1.Condition) {
 	v.Status.Conditions = conditions
 }
 

@@ -42,6 +42,11 @@ type VClusterSpec struct {
 type VClusterStatus struct {
 	// Important: Run "make" to regenerate code after modifying this file
 
+	// Initialization holds the Cluster API v1beta2 contract's initialization fields: provisioned
+	// for the VCluster as an infrastructure cluster, controlPlaneInitialized as a control plane.
+	// +optional
+	Initialization *VClusterInitializationStatus `json:"initialization,omitempty"`
+
 	// Ready defines if the virtual cluster control plane is ready.
 	// +optional
 	// +kubebuilder:default=false
@@ -68,7 +73,10 @@ type VClusterStatus struct {
 
 	// Conditions holds several conditions the vcluster might be in
 	// +optional
-	Conditions Conditions `json:"conditions,omitempty"`
+	// +listType=map
+	// +listMapKey=type
+	// +kubebuilder:validation:MaxItems=32
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
 	// ObservedGeneration is the latest generation observed by the controller.
 	// +optional
@@ -80,13 +88,25 @@ type VClusterStatus struct {
 	ExternalManagedControlPlane *bool `json:"externalManagedControlPlane,omitempty"`
 }
 
+// VClusterInitializationStatus holds the Cluster API v1beta2 contract's initialization fields.
+// +kubebuilder:validation:MinProperties=1
+type VClusterInitializationStatus struct {
+	// Provisioned is true once the VCluster is provisioned as an infrastructure cluster.
+	// +optional
+	Provisioned *bool `json:"provisioned,omitempty"`
+
+	// ControlPlaneInitialized is true once the vcluster API server accepts requests.
+	// +optional
+	ControlPlaneInitialized *bool `json:"controlPlaneInitialized,omitempty"`
+}
+
 // GetConditions returns the set of conditions for this object.
-func (v *VCluster) GetConditions() Conditions {
+func (v *VCluster) GetConditions() []metav1.Condition {
 	return v.Status.Conditions
 }
 
 // SetConditions sets the conditions on this object.
-func (v *VCluster) SetConditions(conditions Conditions) {
+func (v *VCluster) SetConditions(conditions []metav1.Condition) {
 	v.Status.Conditions = conditions
 }
 

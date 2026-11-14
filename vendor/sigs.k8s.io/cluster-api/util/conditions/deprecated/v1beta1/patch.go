@@ -1,9 +1,12 @@
 /*
 Copyright 2020 The Kubernetes Authors.
+
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
+
     http://www.apache.org/licenses/LICENSE-2.0
+
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -11,15 +14,16 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package conditions
+package v1beta1
 
 import (
 	"reflect"
 
-	v1alpha1 "github.com/loft-sh/cluster-api-provider-vcluster/api/infrastructure/v1alpha1"
-
 	"github.com/google/go-cmp/cmp"
 	"github.com/pkg/errors"
+
+	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
+	"sigs.k8s.io/cluster-api/util"
 )
 
 // Patch defines a list of operations to change a list of conditions into another.
@@ -27,8 +31,8 @@ type Patch []PatchOperation
 
 // PatchOperation define an operation that changes a single condition.
 type PatchOperation struct {
-	Before *v1alpha1.Condition
-	After  *v1alpha1.Condition
+	Before *clusterv1.Condition
+	After  *clusterv1.Condition
 	Op     PatchOperationType
 }
 
@@ -46,12 +50,19 @@ const (
 	RemoveConditionPatch PatchOperationType = "Remove"
 )
 
-// NewPatch returns the list of Patch required to align source conditions to after conditions.
-func NewPatch(before Getter, after Getter) Patch {
+// NewPatch returns the Patch required to align source conditions to after conditions.
+func NewPatch(before Getter, after Getter) (Patch, error) {
 	var patch Patch
 
+	if util.IsNil(before) {
+		return nil, errors.New("error creating patch: before object is nil")
+	}
+	if util.IsNil(after) {
+		return nil, errors.New("error creating patch: after object is nil")
+	}
+
 	// Identify AddCondition and ModifyCondition changes.
-	targetConditions := after.GetConditions()
+	targetConditions := after.GetV1Beta1Conditions()
 	for i := range targetConditions {
 		targetCondition := targetConditions[i]
 		currentCondition := Get(before, targetCondition.Type)
@@ -66,7 +77,7 @@ func NewPatch(before Getter, after Getter) Patch {
 	}
 
 	// Identify RemoveCondition changes.
-	baseConditions := before.GetConditions()
+	baseConditions := before.GetV1Beta1Conditions()
 	for i := range baseConditions {
 		baseCondition := baseConditions[i]
 		targetCondition := Get(after, baseCondition.Type)
@@ -74,16 +85,16 @@ func NewPatch(before Getter, after Getter) Patch {
 			patch = append(patch, PatchOperation{Op: RemoveConditionPatch, Before: &baseCondition})
 		}
 	}
-	return patch
+	return patch, nil
 }
 
 // applyOptions allows to set strategies for patch apply.
 type applyOptions struct {
-	ownedConditions []v1alpha1.ConditionType
+	ownedConditions []clusterv1.ConditionType
 	forceOverwrite  bool
 }
 
-func (o *applyOptions) isOwnedCondition(t v1alpha1.ConditionType) bool {
+func (o *applyOptions) isOwnedCondition(t clusterv1.ConditionType) bool {
 	for _, i := range o.ownedConditions {
 		if i == t {
 			return true
@@ -97,7 +108,7 @@ type ApplyOption func(*applyOptions)
 
 // WithOwnedConditions allows to define condition types owned by the controller.
 // In case of conflicts for the owned conditions, the patch helper will always use the value provided by the controller.
-func WithOwnedConditions(t ...v1alpha1.ConditionType) ApplyOption {
+func WithOwnedConditions(t ...clusterv1.ConditionType) ApplyOption {
 	return func(c *applyOptions) {
 		c.ownedConditions = t
 	}
@@ -113,12 +124,19 @@ func WithForceOverwrite(v bool) ApplyOption {
 // Apply executes a three-way merge of a list of Patch.
 // When merge conflicts are detected (latest deviated from before in an incompatible way), an error is returned.
 func (p Patch) Apply(latest Setter, options ...ApplyOption) error {
-	if len(p) == 0 {
+	if p.IsZero() {
 		return nil
+	}
+
+	if util.IsNil(latest) {
+		return errors.New("error patching conditions: latest object was nil")
 	}
 
 	applyOpt := &applyOptions{}
 	for _, o := range options {
+		if util.IsNil(o) {
+			return errors.New("error patching conditions: ApplyOption was nil")
+		}
 		o(applyOpt)
 	}
 
@@ -134,7 +152,7 @@ func (p Patch) Apply(latest Setter, options ...ApplyOption) error {
 			// If the condition is already on latest, check if latest and after agree on the change; if not, this is a conflict.
 			if latestCondition := Get(latest, conditionPatch.After.Type); latestCondition != nil {
 				// If latest and after agree on the change, then it is a conflict.
-				if !hasSameState(latestCondition, conditionPatch.After) {
+				if !HasSameState(latestCondition, conditionPatch.After) {
 					return errors.Errorf("error patching conditions: The condition %q was modified by a different process and this caused a merge/AddCondition conflict: %v", conditionPatch.After.Type, cmp.Diff(latestCondition, conditionPatch.After))
 				}
 				// otherwise, the latest is already as intended.
@@ -161,7 +179,7 @@ func (p Patch) Apply(latest Setter, options ...ApplyOption) error {
 			// If the condition on the latest is different from the base condition, check if
 			// the after state corresponds to the desired value. If not this is a conflict (unless we should ignore conflicts for this condition type).
 			if !reflect.DeepEqual(latestCondition, conditionPatch.Before) {
-				if !hasSameState(latestCondition, conditionPatch.After) {
+				if !HasSameState(latestCondition, conditionPatch.After) {
 					return errors.Errorf("error patching conditions: The condition %q was modified by a different process and this caused a merge/ChangeCondition conflict: %v", conditionPatch.After.Type, cmp.Diff(latestCondition, conditionPatch.After))
 				}
 				// Otherwise the latest is already as intended.
@@ -181,7 +199,7 @@ func (p Patch) Apply(latest Setter, options ...ApplyOption) error {
 			// If the condition is still on the latest, check if it is changed in the meantime;
 			// if so then this is a conflict.
 			if latestCondition := Get(latest, conditionPatch.Before.Type); latestCondition != nil {
-				if !hasSameState(latestCondition, conditionPatch.Before) {
+				if !HasSameState(latestCondition, conditionPatch.Before) {
 					return errors.Errorf("error patching conditions: The condition %q was modified by a different process and this caused a merge/RemoveCondition conflict: %v", conditionPatch.Before.Type, cmp.Diff(latestCondition, conditionPatch.Before))
 				}
 			}
@@ -192,7 +210,10 @@ func (p Patch) Apply(latest Setter, options ...ApplyOption) error {
 	return nil
 }
 
-// IsZero returns true if the patch has no changes.
+// IsZero returns true if the patch is nil or has no changes.
 func (p Patch) IsZero() bool {
+	if p == nil {
+		return true
+	}
 	return len(p) == 0
 }

@@ -6,63 +6,37 @@ import (
 
 	controlplanev1alpha1 "github.com/loft-sh/cluster-api-provider-vcluster/api/controlplane/v1alpha1"
 	infrastructurev1alpha1 "github.com/loft-sh/cluster-api-provider-vcluster/api/infrastructure/v1alpha1"
-	"github.com/loft-sh/cluster-api-provider-vcluster/pkg/util/patch"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/utils/ptr"
+	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	external "sigs.k8s.io/cluster-api/controllers/external"
+	"sigs.k8s.io/cluster-api/util/patch"
 )
 
 var (
 	skipInfrastructureClusterAnnotation = "vcluster.loft.sh/skip-infrastructure-cluster-patch"
 )
 
-func (r *GenericReconciler) patchInfrastructureCluster(ctx context.Context, vCluster GenericVCluster) (retErr error) {
-	if !r.clusterKindExists || vCluster.GetAnnotations()[skipInfrastructureClusterAnnotation] == "true" {
+func (r *GenericReconciler) patchInfrastructureCluster(ctx context.Context, cluster *clusterv1.Cluster, vCluster GenericVCluster) (retErr error) {
+	if !r.clusterKindExists || cluster == nil || vCluster.GetAnnotations()[skipInfrastructureClusterAnnotation] == "true" {
 		return nil
 	}
 
-	// get owner reference
-	ownerRef := metav1.GetControllerOf(vCluster)
-	if ownerRef == nil {
-		return fmt.Errorf("no controller owner reference found")
-	}
-
-	// get the parent cluster
-	parentCluster, err := external.Get(ctx, r.Client, &corev1.ObjectReference{
-		APIVersion: ownerRef.APIVersion,
-		Kind:       ownerRef.Kind,
-		Name:       ownerRef.Name,
-		Namespace:  vCluster.GetNamespace(),
-	})
-	if err != nil {
-		return fmt.Errorf("get parent cluster: %w", err)
-	}
-
 	// find infrastructure cluster
-	kind, _, err := unstructured.NestedString(parentCluster.Object, "spec", "infrastructureRef", "kind")
+	if !cluster.Spec.InfrastructureRef.IsDefined() {
+		return nil
+	}
+	kind := cluster.Spec.InfrastructureRef.Kind
+	apiGroup := cluster.Spec.InfrastructureRef.APIGroup
+	mappings, err := r.Client.RESTMapper().RESTMappings(schema.GroupKind{Group: apiGroup, Kind: kind})
 	if err != nil {
-		return fmt.Errorf("get infrastructure cluster kind: %w", err)
+		return fmt.Errorf("get version for group %s and kind %s: %w", apiGroup, kind, err)
+	} else if len(mappings) == 0 {
+		return fmt.Errorf("no version found for group %s and kind %s", apiGroup, kind)
 	}
-	apiVersion, found, err := unstructured.NestedString(parentCluster.Object, "spec", "infrastructureRef", "apiVersion")
-	if !found || err != nil {
-		// try to get the apiGroup (for v1beta2 clusters)
-		apiGroup, _, err := unstructured.NestedString(parentCluster.Object, "spec", "infrastructureRef", "apiGroup")
-		if err != nil {
-			return fmt.Errorf("get infrastructure cluster api group: %w", err)
-		}
-
-		// now find the version from the apiGroup
-		mappings, err := r.Client.RESTMapper().RESTMappings(schema.GroupKind{Group: apiGroup, Kind: kind})
-		if err != nil {
-			return fmt.Errorf("get version for group %s and kind %s: %w", apiGroup, kind, err)
-		} else if len(mappings) == 0 {
-			return fmt.Errorf("no version found for group %s and kind %s", apiGroup, kind)
-		}
-		apiVersion = apiGroup + "/" + mappings[0].GroupVersionKind.Version
-	}
+	apiVersion := apiGroup + "/" + mappings[0].GroupVersionKind.Version
 
 	// check if the infrastructure cluster is a vcluster, if yes then we don't need to patch the infrastructure cluster
 	if kind == "VCluster" && (apiVersion == infrastructurev1alpha1.GroupVersion.String() || apiVersion == controlplanev1alpha1.GroupVersion.String()) {
@@ -72,11 +46,7 @@ func (r *GenericReconciler) patchInfrastructureCluster(ctx context.Context, vClu
 	// set the external managed control plane to true to let Cluster API know that the control plane is externally managed
 	vCluster.GetStatus().ExternalManagedControlPlane = ptr.To(true)
 
-	// get the infrastructure provider name
-	name, _, err := unstructured.NestedString(parentCluster.Object, "spec", "infrastructureRef", "name")
-	if err != nil {
-		return fmt.Errorf("failed to get infrastructure cluster name: %w", err)
-	}
+	name := cluster.Spec.InfrastructureRef.Name
 
 	// get the infrastructure cluster
 	infrastructureCluster, err := external.Get(ctx, r.Client, &corev1.ObjectReference{

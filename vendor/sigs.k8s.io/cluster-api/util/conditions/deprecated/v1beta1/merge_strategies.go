@@ -1,9 +1,12 @@
 /*
 Copyright 2020 The Kubernetes Authors.
+
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
+
     http://www.apache.org/licenses/LICENSE-2.0
+
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -11,22 +14,23 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package conditions
+package v1beta1
 
 import (
 	"fmt"
 	"strings"
 
-	v1alpha1 "github.com/loft-sh/cluster-api-provider-vcluster/api/infrastructure/v1alpha1"
+	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 )
 
 // mergeOptions allows to set strategies for merging a set of conditions into a single condition,
 // and more specifically for computing the target Reason and the target Message.
 type mergeOptions struct {
-	conditionTypes                     []v1alpha1.ConditionType
+	conditionTypes                     []clusterv1.ConditionType
+	negativeConditionTypes             []clusterv1.ConditionType
 	addSourceRef                       bool
 	addStepCounter                     bool
-	addStepCounterIfOnlyConditionTypes []v1alpha1.ConditionType
+	addStepCounterIfOnlyConditionTypes []clusterv1.ConditionType
 	stepCounter                        int
 }
 
@@ -34,16 +38,24 @@ type mergeOptions struct {
 type MergeOption func(*mergeOptions)
 
 // WithConditions instructs merge about the condition types to consider when doing a merge operation;
-// if this option is not specified, all the conditions (excepts Ready) will be considered. This is required
+// if this option is not specified, all the conditions (excepts Ready) will be considered. This is required,
 // so we can provide some guarantees about the semantic of the target condition without worrying about
 // side effects if someone or something adds custom conditions to the objects.
 //
 // NOTE: The order of conditions types defines the priority for determining the Reason and Message for the
 // target condition.
 // IMPORTANT: This options works only while generating the Summary condition.
-func WithConditions(t ...v1alpha1.ConditionType) MergeOption {
+func WithConditions(t ...clusterv1.ConditionType) MergeOption {
 	return func(c *mergeOptions) {
 		c.conditionTypes = t
+	}
+}
+
+// WithNegativePolarityConditions instruct merge about which conditions should be considered having negative polarity.
+// IMPORTANT: this must be a subset of WithConditions.
+func WithNegativePolarityConditions(t ...clusterv1.ConditionType) MergeOption {
+	return func(c *mergeOptions) {
+		c.negativeConditionTypes = t
 	}
 }
 
@@ -72,7 +84,7 @@ func WithStepCounterIf(value bool) MergeOption {
 //
 // IMPORTANT: This options requires WithStepCounter or WithStepCounterIf to be set.
 // IMPORTANT: This options works only while generating the Summary condition.
-func WithStepCounterIfOnly(t ...v1alpha1.ConditionType) MergeOption {
+func WithStepCounterIfOnly(t ...clusterv1.ConditionType) MergeOption {
 	return func(c *mergeOptions) {
 		c.addStepCounterIfOnlyConditionTypes = t
 	}
@@ -93,7 +105,7 @@ func getReason(groups conditionGroups, options *mergeOptions) string {
 
 // getFirstReason returns the first reason from the ordered list of conditions in the top group.
 // If required, the reason gets localized with the source object reference.
-func getFirstReason(g conditionGroups, order []v1alpha1.ConditionType, addSourceRef bool) string {
+func getFirstReason(g conditionGroups, order []clusterv1.ConditionType, addSourceRef bool) string {
 	if condition := getFirstCondition(g, order); condition != nil {
 		reason := condition.Reason
 		if addSourceRef {
@@ -134,7 +146,7 @@ func getStepCounterMessage(groups conditionGroups, to int) string {
 }
 
 // getFirstMessage returns the message from the ordered list of conditions in the top group.
-func getFirstMessage(groups conditionGroups, order []v1alpha1.ConditionType) string {
+func getFirstMessage(groups conditionGroups, order []clusterv1.ConditionType) string {
 	if condition := getFirstCondition(groups, order); condition != nil {
 		return condition.Message
 	}
@@ -142,7 +154,7 @@ func getFirstMessage(groups conditionGroups, order []v1alpha1.ConditionType) str
 }
 
 // getFirstCondition returns a first condition from the ordered list of conditions in the top group.
-func getFirstCondition(g conditionGroups, priority []v1alpha1.ConditionType) *localizedCondition {
+func getFirstCondition(g conditionGroups, priority []clusterv1.ConditionType) *localizedCondition {
 	topGroup := g.TopGroup()
 	if topGroup == nil {
 		return nil

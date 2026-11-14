@@ -34,7 +34,12 @@ import (
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/utils/ptr"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
+	"sigs.k8s.io/cluster-api/util/annotations"
+	"sigs.k8s.io/cluster-api/util/conditions"
+	"sigs.k8s.io/cluster-api/util/patch"
+	"sigs.k8s.io/cluster-api/util/paused"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -42,9 +47,7 @@ import (
 	infrastructurev1alpha1 "github.com/loft-sh/cluster-api-provider-vcluster/api/infrastructure/v1alpha1"
 	"github.com/loft-sh/cluster-api-provider-vcluster/pkg/constants"
 	"github.com/loft-sh/cluster-api-provider-vcluster/pkg/helm"
-	"github.com/loft-sh/cluster-api-provider-vcluster/pkg/util/conditions"
 	"github.com/loft-sh/cluster-api-provider-vcluster/pkg/util/kubeconfighelper"
-	"github.com/loft-sh/cluster-api-provider-vcluster/pkg/util/patch"
 )
 
 // GenericReconciler reconciles a VCluster object
@@ -63,6 +66,7 @@ type GenericReconciler struct {
 }
 
 type GenericVCluster interface {
+	client.Object
 	conditions.Setter
 
 	GetSpec() *infrastructurev1alpha1.VClusterSpec
@@ -83,6 +87,13 @@ func (r *GenericReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ 
 		return ctrl.Result{}, nil
 	}
 
+	// the owner Cluster, nil without Cluster API or before the Cluster controller set the
+	// owner reference
+	cluster, err := r.ownerCluster(ctx, vCluster)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// is deleting?
 	if vCluster.GetDeletionTimestamp() != nil {
 		// check if namespace is deleting
@@ -92,6 +103,10 @@ func (r *GenericReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ 
 			return ctrl.Result{}, nil
 		} else if namespace.DeletionTimestamp != nil {
 			return ctrl.Result{}, RemoveFinalizer(ctx, r.Client, vCluster, CleanupFinalizer)
+		}
+
+		if isPaused(cluster, vCluster) {
+			return ctrl.Result{}, nil
 		}
 
 		err = deleteHelmChart(ctx, r.HelmClient, r.HelmSecrets, req.Namespace, req.Name, r.Log)
@@ -108,22 +123,18 @@ func (r *GenericReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ 
 		return ctrl.Result{}, RemoveFinalizer(ctx, r.Client, vCluster, CleanupFinalizer)
 	}
 
-	// is there an owner Cluster CR set by CAPI cluster controller?
-	// only check when installed via CAPI - Cluster CRD is present
-	if r.clusterKindExists {
-		clusterOwner := false
-		for _, v := range vCluster.GetOwnerReferences() {
-			if v.Kind == "Cluster" {
-				clusterOwner = true
-				break
-			}
+	if cluster != nil {
+		isPaused, requeue, err := paused.EnsurePausedCondition(ctx, r.Client, cluster, vCluster)
+		if err != nil || isPaused || requeue {
+			return ctrl.Result{}, err
 		}
-		if !clusterOwner {
-			// as per CAPI docs:
-			// The cluster controller will set an OwnerReference on the infrastructureCluster.
-			// This controller should normally take no action during reconciliation until it sees the OwnerReference.
-			return ctrl.Result{}, nil
-		}
+	} else if r.clusterKindExists {
+		// as per CAPI docs:
+		// The cluster controller will set an OwnerReference on the infrastructureCluster.
+		// This controller should normally take no action during reconciliation until it sees the OwnerReference.
+		return ctrl.Result{}, nil
+	} else if annotations.HasPaused(vCluster) {
+		return ctrl.Result{}, nil
 	}
 
 	// ensure finalizer
@@ -138,7 +149,8 @@ func (r *GenericReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ 
 		return ctrl.Result{}, err
 	}
 	defer func() {
-		// Always reconcile the Status.Phase field.
+		// Always reconcile the summary conditions and the Status.Phase field.
+		setSummaryConditions(vCluster)
 		r.reconcilePhase(vCluster)
 
 		// Always attempt to Patch the Cluster object and status after each reconciliation.
@@ -159,7 +171,12 @@ func (r *GenericReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ 
 			"namespace", vCluster.GetNamespace(),
 			"name", vCluster.GetName(),
 		)
-		conditions.MarkFalse(vCluster, infrastructurev1alpha1.HelmChartDeployedCondition, "HelmDeployFailed", infrastructurev1alpha1.ConditionSeverityError, "%v", err)
+		conditions.Set(vCluster, metav1.Condition{
+			Type:    infrastructurev1alpha1.HelmChartDeployedCondition,
+			Status:  metav1.ConditionFalse,
+			Reason:  infrastructurev1alpha1.HelmDeployFailedReason,
+			Message: err.Error(),
+		})
 		return ctrl.Result{RequeueAfter: time.Second * 5}, err
 	}
 
@@ -171,24 +188,38 @@ func (r *GenericReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ 
 			"name", vCluster.GetName(),
 			"err", err,
 		)
-		conditions.MarkFalse(vCluster, infrastructurev1alpha1.KubeconfigReadyCondition, "CheckFailed", infrastructurev1alpha1.ConditionSeverityWarning, "%v", err)
+		conditions.Set(vCluster, metav1.Condition{
+			Type:    infrastructurev1alpha1.KubeconfigReadyCondition,
+			Status:  metav1.ConditionFalse,
+			Reason:  infrastructurev1alpha1.CheckFailedReason,
+			Message: err.Error(),
+		})
 		return ctrl.Result{RequeueAfter: time.Second * 5}, nil
 	}
 
 	// sync the infrastructure cluster
-	err = r.patchInfrastructureCluster(ctx, vCluster)
+	err = r.patchInfrastructureCluster(ctx, cluster, vCluster)
 	if err != nil {
 		r.Log.Error(err, "error during infrastructure cluster patch",
 			"namespace", vCluster.GetNamespace(),
 			"name", vCluster.GetName(),
 		)
-		conditions.MarkFalse(vCluster, infrastructurev1alpha1.InfrastructureClusterSyncedCondition, "PatchFailed", infrastructurev1alpha1.ConditionSeverityError, "%v", err)
+		conditions.Set(vCluster, metav1.Condition{
+			Type:    infrastructurev1alpha1.InfrastructureClusterSyncedCondition,
+			Status:  metav1.ConditionFalse,
+			Reason:  infrastructurev1alpha1.PatchFailedReason,
+			Message: err.Error(),
+		})
 		return ctrl.Result{}, err
 	}
-	conditions.MarkTrue(vCluster, infrastructurev1alpha1.InfrastructureClusterSyncedCondition)
+	markTrue(vCluster, infrastructurev1alpha1.InfrastructureClusterSyncedCondition)
 
 	// check if vcluster is ready
 	vCluster.GetStatus().Ready, err = r.checkReadyz(vCluster, restConfig)
+	if vCluster.GetStatus().Ready {
+		// provisioned never goes back to false (Cluster API v1beta2 contract)
+		initialization(vCluster).Provisioned = ptr.To(true)
+	}
 	if err != nil || !vCluster.GetStatus().Ready {
 		r.Log.V(1).Info("readiness check failed", "err", err)
 		return ctrl.Result{RequeueAfter: time.Second * 5}, nil
@@ -206,7 +237,7 @@ func (r *GenericReconciler) reconcilePhase(vCluster GenericVCluster) {
 	vCluster.GetStatus().Reason = ""
 	vCluster.GetStatus().Message = ""
 	for _, condition := range vCluster.GetStatus().Conditions {
-		if condition.Status == corev1.ConditionFalse && condition.Severity == infrastructurev1alpha1.ConditionSeverityError {
+		if condition.Status == metav1.ConditionFalse && isFailureReason(condition.Reason) {
 			vCluster.GetStatus().Phase = infrastructurev1alpha1.VirtualClusterFailed
 			vCluster.GetStatus().Reason = condition.Reason
 			vCluster.GetStatus().Message = condition.Message
@@ -332,7 +363,7 @@ func (r *GenericReconciler) redeployIfNeeded(_ context.Context, vCluster Generic
 		return fmt.Errorf("error installing / upgrading vcluster: %w", err)
 	}
 
-	conditions.MarkTrue(vCluster, infrastructurev1alpha1.HelmChartDeployedCondition)
+	markTrue(vCluster, infrastructurev1alpha1.HelmChartDeployedCondition)
 	conditions.Delete(vCluster, infrastructurev1alpha1.KubeconfigReadyCondition)
 
 	return nil
@@ -364,11 +395,12 @@ func (r *GenericReconciler) syncVClusterKubeconfig(ctx context.Context, vCluster
 			return nil, err
 		}
 
-		conditions.MarkTrue(vCluster, infrastructurev1alpha1.ControlPlaneInitializedCondition)
+		markTrue(vCluster, infrastructurev1alpha1.ControlPlaneInitializedCondition)
 	}
 	// setting .Status.Initialized outside of the condition above to ensure
 	// that it is set on old CRs, which were missing this field, as well
 	vCluster.GetStatus().Initialized = true
+	initialization(vCluster).ControlPlaneInitialized = ptr.To(true)
 
 	// write kubeconfig to the vcluster.Name+"-kubeconfig" Secret as expected by CAPI convention
 	kubeConfig, err := GetVClusterKubeConfig(ctx, r.Client, vCluster)
@@ -425,13 +457,8 @@ func (r *GenericReconciler) syncVClusterKubeconfig(ctx context.Context, vCluster
 
 	// get cluster name
 	clusterName := vCluster.GetName()
-	if r.clusterKindExists {
-		for _, ownerRef := range vCluster.GetOwnerReferences() {
-			if ownerRef.Kind == "Cluster" {
-				clusterName = ownerRef.Name
-				break
-			}
-		}
+	if ownerRef := clusterOwnerRef(vCluster); r.clusterKindExists && ownerRef != nil {
+		clusterName = ownerRef.Name
 	}
 
 	// create kubeconfig secret
@@ -481,7 +508,7 @@ func (r *GenericReconciler) syncVClusterKubeconfig(ctx context.Context, vCluster
 		return nil, fmt.Errorf("can not create a kubeconfig secret: %w", err)
 	}
 
-	conditions.MarkTrue(vCluster, infrastructurev1alpha1.KubeconfigReadyCondition)
+	markTrue(vCluster, infrastructurev1alpha1.KubeconfigReadyCondition)
 	return restConfig, nil
 }
 

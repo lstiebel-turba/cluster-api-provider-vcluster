@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
@@ -80,30 +81,43 @@ func newUnstructured(gvk schema.GroupVersionKind, namespace, name string) *unstr
 	return u
 }
 
+// copiedLabelsAnnotation lists the label keys copyFluxMetadata copied, comma-separated: a label
+// gone from the VCluster goes from the Flux object too.
+const copiedLabelsAnnotation = "vcluster.loft.sh/copied-labels"
+
 // copyFluxMetadata puts the VCluster's labels and the given Flux annotations it carries on
-// obj, so selectors and watches on the VCluster's labels find the Flux objects too. Labels and
-// annotations of obj's own stay.
+// obj, so selectors and watches on the VCluster's labels find the Flux objects too. A label it
+// copied before and the VCluster no longer has is removed; other labels and annotations of obj's
+// own stay.
 func copyFluxMetadata(vCluster GenericVCluster, obj *unstructured.Unstructured, annotationKeys []string) {
-	if l := vCluster.GetLabels(); len(l) > 0 {
-		labels := obj.GetLabels()
-		if labels == nil {
-			labels = map[string]string{}
+	labels, annotations := obj.GetLabels(), obj.GetAnnotations()
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	vcLabels := vCluster.GetLabels()
+	for _, key := range strings.Split(annotations[copiedLabelsAnnotation], ",") {
+		if _, ok := vcLabels[key]; key != "" && !ok {
+			delete(labels, key)
 		}
-		maps.Copy(labels, l)
+	}
+	maps.Copy(labels, vcLabels)
+	if len(vcLabels) > 0 {
+		annotations[copiedLabelsAnnotation] = strings.Join(slices.Sorted(maps.Keys(vcLabels)), ",")
+	} else {
+		delete(annotations, copiedLabelsAnnotation)
+	}
+	for _, key := range annotationKeys {
+		if value, ok := vCluster.GetAnnotations()[key]; ok {
+			annotations[key] = value
+		}
+	}
+	if len(labels) > 0 || obj.GetLabels() != nil {
 		obj.SetLabels(labels)
 	}
-	annotations := obj.GetAnnotations()
-	for _, key := range annotationKeys {
-		value, ok := vCluster.GetAnnotations()[key]
-		if !ok {
-			continue
-		}
-		if annotations == nil {
-			annotations = map[string]string{}
-		}
-		annotations[key] = value
-	}
-	if annotations != nil {
+	if len(annotations) > 0 || obj.GetAnnotations() != nil {
 		obj.SetAnnotations(annotations)
 	}
 }

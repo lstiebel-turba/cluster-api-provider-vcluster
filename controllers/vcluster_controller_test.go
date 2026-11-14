@@ -771,6 +771,30 @@ func TestFluxInstallerCopiesLabelsAndReconcileRequests(t *testing.T) {
 	if got := e.helmRelease().GetAnnotations()["reconcile.fluxcd.io/requestedAt"]; got != "op-2" {
 		t.Errorf("requestedAt after the second request: %q", got)
 	}
+	// a label removed from the VCluster goes from the HelmRelease and the HelmRepository; one
+	// of the HelmRelease's own stays
+	hr = e.helmRelease()
+	hr.SetLabels(map[string]string{"turba-env.dev/tenant": "alice", "own": "yes"})
+	if err := e.c.Update(context.Background(), hr); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "vc1"}, vc); err != nil {
+		t.Fatal(err)
+	}
+	vc.Labels = map[string]string{"team": "a"}
+	if err := e.c.Update(context.Background(), vc); err != nil {
+		t.Fatal(err)
+	}
+	e.reconcile(1)
+	if l := e.helmRelease().GetLabels(); l["turba-env.dev/tenant"] != "" || l["team"] != "a" || l["own"] != "yes" {
+		t.Errorf("HelmRelease labels after the VCluster's changed: %v", l)
+	}
+	if err := e.c.Get(context.Background(), client.ObjectKeyFromObject(repo), repo); err != nil {
+		t.Fatal(err)
+	}
+	if l := repo.GetLabels(); l["turba-env.dev/tenant"] != "" || l["team"] != "a" {
+		t.Errorf("HelmRepository labels after the VCluster's changed: %v", l)
+	}
 }
 
 func TestFluxDriftDetectionPerVCluster(t *testing.T) {

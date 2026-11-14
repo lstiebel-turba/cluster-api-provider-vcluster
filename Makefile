@@ -62,6 +62,10 @@ vet: ## Run go vet against code.
 test: manifests generate fmt vet envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" go test ./... -coverprofile cover.out
 
+.PHONY: e2e-kwok
+e2e-kwok: ## End-to-end test of the flux installer on a kwok cluster (no Docker; hack/e2e-kwok.sh).
+	hack/e2e-kwok.sh
+
 ##@ Build
 
 .PHONY: build

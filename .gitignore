@@ -37,3 +37,6 @@ kubeconfig.yaml
 
 /tools
 custom-gcl
+
+# hack/e2e-kwok.sh downloads, builds and logs
+/.cache/

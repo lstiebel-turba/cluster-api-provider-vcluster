@@ -110,7 +110,7 @@ func (v *VCluster) SetConditions(conditions []metav1.Condition) {
 	v.Status.Conditions = conditions
 }
 
-// +kubebuilder:validation:XValidation:rule="(has(self.installer) ? self.installer : ”) == (has(oldSelf.installer) ? oldSelf.installer : ”)",message="installer is immutable"
+// +kubebuilder:validation:XValidation:rule="has(self.installer) == has(oldSelf.installer) && (!has(self.installer) || self.installer == oldSelf.installer)",message="installer is immutable"
 type VirtualClusterHelmRelease struct {
 	// infos about what chart to deploy
 	// +optional

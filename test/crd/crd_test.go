@@ -24,11 +24,12 @@ func TestCRDsInstall(t *testing.T) {
 		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "config", "crd", "bases")},
 		ErrorIfCRDPathMissing: true,
 	}
+	// stopped even when Start fails on a CRD: the API server and etcd are up by then
+	t.Cleanup(func() { _ = env.Stop() })
 	cfg, err := env.Start()
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = env.Stop() })
 
 	c, err := client.New(cfg, client.Options{})
 	if err != nil {

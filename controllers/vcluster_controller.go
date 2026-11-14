@@ -221,6 +221,11 @@ func (r *GenericReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ 
 		}
 	}()
 
+	// the installer stays the one that deployed first, even if --installer changes
+	if vCluster.GetStatus().Installer == "" {
+		vCluster.GetStatus().Installer = r.installer(vCluster)
+	}
+
 	// check if we have to redeploy
 	err = r.redeployIfNeeded(ctx, vCluster)
 	if err == nil && !conditions.IsTrue(vCluster, infrastructurev1alpha1.HelmChartDeployedCondition) {
@@ -358,8 +363,12 @@ func (r *GenericReconciler) reconcilePhase(vCluster GenericVCluster) {
 	}
 }
 
-// installer returns the VCluster's installer: its own, else the provider's default, else helm.
+// installer returns the VCluster's installer: the one that deployed it (status), else its own,
+// else the provider's default, else helm.
 func (r *GenericReconciler) installer(vCluster GenericVCluster) infrastructurev1alpha1.Installer {
+	if installer := vCluster.GetStatus().Installer; installer != "" {
+		return installer
+	}
 	if hr := vCluster.GetSpec().HelmRelease; hr != nil && hr.Installer != "" {
 		return hr.Installer
 	}

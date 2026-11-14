@@ -25,6 +25,8 @@ import (
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
 // VClusterSpec defines the desired state of VCluster
+// helmRelease.installer may be set at create only: neither added, removed nor changed later.
+// +kubebuilder:validation:XValidation:rule="(has(self.helmRelease) && has(self.helmRelease.installer) ? self.helmRelease.installer : '-') == (has(oldSelf.helmRelease) && has(oldSelf.helmRelease.installer) ? oldSelf.helmRelease.installer : '-')",message="installer is immutable"
 type VClusterSpec struct {
 	// Important: Run "make" to regenerate code after modifying this file
 
@@ -92,6 +94,12 @@ type VClusterStatus struct {
 	// +optional
 	// +kubebuilder:validation:MaxLength=64
 	DeployedChartHash string `json:"deployedChartHash,omitempty"`
+
+	// Installer is the installer that deploys the chart, recorded before the first deploy: later
+	// reconciles and the deletion keep it, whatever --installer says by then.
+	// +optional
+	// +kubebuilder:validation:Enum=helm;flux
+	Installer Installer `json:"installer,omitempty"`
 }
 
 // VClusterInitializationStatus holds the Cluster API v1beta2 contract's initialization fields.
@@ -116,7 +124,6 @@ func (v *VCluster) SetConditions(conditions []metav1.Condition) {
 	v.Status.Conditions = conditions
 }
 
-// +kubebuilder:validation:XValidation:rule="has(self.installer) == has(oldSelf.installer) && (!has(self.installer) || self.installer == oldSelf.installer)",message="installer is immutable"
 type VirtualClusterHelmRelease struct {
 	// infos about what chart to deploy
 	// +optional

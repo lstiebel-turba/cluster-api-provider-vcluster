@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -35,19 +36,50 @@ func TestCRDsInstall(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	// the installer rule: may be set once, never changed
-	vc := &unstructured.Unstructured{}
-	vc.SetGroupVersionKind(schema.GroupVersionKind{Group: "infrastructure.cluster.x-k8s.io", Version: "v1alpha1", Kind: "VCluster"})
-	vc.SetNamespace(metav1.NamespaceDefault)
-	vc.SetName("vc1")
-	vc.Object["spec"] = map[string]any{"helmRelease": map[string]any{"installer": "flux"}}
-	if err := c.Create(ctx, vc); err != nil {
-		t.Fatalf("create: %v", err)
+	// the installer rule: set at create or never, never changed, added or removed
+	for _, group := range []string{"infrastructure.cluster.x-k8s.io", "controlplane.cluster.x-k8s.io"} {
+		for _, tc := range []struct {
+			name     string
+			from, to map[string]any // spec.helmRelease, nil: none
+		}{
+			{"changed", map[string]any{"installer": "flux"}, map[string]any{"installer": "helm"}},
+			{"added", map[string]any{"values": "a: 1"}, map[string]any{"values": "a: 1", "installer": "flux"}},
+			{"added with helmRelease", nil, map[string]any{"installer": "flux"}},
+			{"removed", map[string]any{"installer": "flux"}, map[string]any{}},
+			{"removed with helmRelease", map[string]any{"installer": "helm"}, nil},
+		} {
+			vc := &unstructured.Unstructured{}
+			vc.SetGroupVersionKind(schema.GroupVersionKind{Group: group, Version: "v1alpha1", Kind: "VCluster"})
+			vc.SetNamespace(metav1.NamespaceDefault)
+			vc.SetGenerateName("vc-")
+			vc.Object["spec"] = helmReleaseSpec(tc.from)
+			if err := c.Create(ctx, vc); err != nil {
+				t.Fatalf("%s %s: create: %v", group, tc.name, err)
+			}
+			vc.Object["spec"] = helmReleaseSpec(tc.to)
+			err := c.Update(ctx, vc)
+			if err == nil || !strings.Contains(err.Error(), "installer is immutable") {
+				t.Errorf("%s: installer %s: %v, want the immutability rule to refuse", group, tc.name, err)
+			}
+
+			// other changes pass
+			vc.Object["spec"] = helmReleaseSpec(tc.from)
+			if err := c.Get(ctx, client.ObjectKeyFromObject(vc), vc); err != nil {
+				t.Fatal(err)
+			}
+			if err := unstructured.SetNestedField(vc.Object, "10.0.0.1", "spec", "controlPlaneEndpoint", "host"); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.Update(ctx, vc); err != nil {
+				t.Errorf("%s %s: another change refused: %v", group, tc.name, err)
+			}
+		}
 	}
-	if err := unstructured.SetNestedField(vc.Object, "helm", "spec", "helmRelease", "installer"); err != nil {
-		t.Fatal(err)
+}
+
+func helmReleaseSpec(helmRelease map[string]any) map[string]any {
+	if helmRelease == nil {
+		return map[string]any{}
 	}
-	if err := c.Update(ctx, vc); err == nil {
-		t.Error("installer changed from flux to helm: want the immutability rule to refuse")
-	}
+	return map[string]any{"helmRelease": helmRelease}
 }

@@ -856,3 +856,33 @@ func TestFluxServiceAccount(t *testing.T) {
 		t.Errorf("serviceAccountName %q, want vcluster-installer", sa)
 	}
 }
+
+// The installer that deployed a VCluster stays, whatever --installer says later.
+func TestInstallerRecorded(t *testing.T) {
+	cluster := &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "ns"}}
+	h, got := reconcileWith(t, Options{Installer: infrastructurev1alpha1.HelmInstaller}, cluster, ownedVCluster())
+	if got.Status.Installer != infrastructurev1alpha1.HelmInstaller || h.upgrades != 1 {
+		t.Errorf("status.installer %q, helm upgrades %d", got.Status.Installer, h.upgrades)
+	}
+
+	// deployed by flux, the provider flipped to helm since: still flux, helm never runs
+	vc := ownedVCluster()
+	vc.Status.Installer = infrastructurev1alpha1.FluxInstaller
+	e := newFluxEnv(t, cluster.DeepCopy(), vc)
+	e.r.Options.Installer = infrastructurev1alpha1.HelmInstaller
+	e.reconcile(2)
+	if e.h.upgrades != 0 {
+		t.Errorf("helm ran for a VCluster flux deployed: %d", e.h.upgrades)
+	}
+	hr := e.helmRelease()
+	if err := e.c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "vc1"}, vc); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.c.Delete(context.Background(), vc); err != nil {
+		t.Fatal(err)
+	}
+	e.reconcile(1)
+	if err := e.c.Get(context.Background(), client.ObjectKeyFromObject(hr), hr); !kerrors.IsNotFound(err) {
+		t.Errorf("HelmRelease after the delete: %v", err)
+	}
+}

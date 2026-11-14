@@ -1,0 +1,28 @@
+# Weekly: red when upstream (loft-sh) has a commit on main the fork has neither merged nor listed in
+# hack/upstream-skipped.txt. The red run is the notification; merge or skip it (docs/fork.md,
+# "Upstream sync"), then re-run. Scheduled runs use the default branch's copy of this file.
+name: upstream-watch
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-watch
+  cancel-in-progress: true
+
+jobs:
+  upstream:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: upstream commits neither merged nor skipped
+        run: hack/upstream-sync.sh list

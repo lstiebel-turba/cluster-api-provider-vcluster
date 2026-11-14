@@ -1,0 +1,3 @@
+# Upstream (loft-sh) commits on main the fork doesn't take as they are: "<full sha> <reason>".
+# hack/upstream-sync.sh lists every other upstream commit the fork lacks. Add a line with
+# `hack/upstream-sync.sh skip SHA REASON...` (docs/fork.md, "Upstream sync").

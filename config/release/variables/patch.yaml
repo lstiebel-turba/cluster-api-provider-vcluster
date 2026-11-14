@@ -1,0 +1,12 @@
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --namespace=${CAPVC_WATCH_NAMESPACES:=}
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --namespace-selector=${CAPVC_NAMESPACE_SELECTOR:=}
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --require-chart-version=${CAPVC_REQUIRE_CHART_VERSION:=false}
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --concurrency=${CAPVC_CONCURRENCY:=4}

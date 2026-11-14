@@ -1,0 +1,52 @@
+# End-to-end test on kind with a real vCluster (hack/e2e-kind.sh): create, park and wake, delete,
+# and (flux) adopting a hand-written HelmRelease, once per installer.
+name: e2e-kind
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-kind-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # renovate: datasource=github-releases depName=kubernetes-sigs/kind
+  KIND_VERSION: v0.33.0
+  KIND_SHA256: aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d # kind-linux-amd64
+
+jobs:
+  e2e:
+    name: e2e (${{ matrix.installer }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        installer: [helm, flux]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: kind
+        run: |
+          curl -fsSLo "$RUNNER_TEMP/kind" "https://github.com/kubernetes-sigs/kind/releases/download/$KIND_VERSION/kind-linux-amd64"
+          echo "$KIND_SHA256  $RUNNER_TEMP/kind" | sha256sum -c -
+          sudo install -m 0755 "$RUNNER_TEMP/kind" /usr/local/bin/kind
+          kind version
+          kubectl version --client
+      - name: e2e
+        env:
+          INSTALLER: ${{ matrix.installer }}
+          ARTIFACTS: ${{ runner.temp }}/e2e-artifacts
+        run: make e2e-kind INSTALLER="$INSTALLER"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: e2e-kind-${{ matrix.installer }}
+          path: ${{ runner.temp }}/e2e-artifacts
+          if-no-files-found: ignore
+          retention-days: 7

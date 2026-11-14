@@ -1,0 +1,24 @@
+# Per-namespace rights for the flux installer: replaces the cluster-wide manager-role with
+#   manager-cluster-role    bound cluster-wide: VClusters, Clusters, namespaces, infrastructure clusters
+#   manager-namespace-role  bound by you, with a RoleBinding in each namespace with VClusters:
+#                           Secrets, Services, PersistentVolumeClaims, HelmReleases, HelmRepositories
+# Together they hold exactly manager-role's rules (test/rbac). See ../README.md.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+- cluster_role.yaml
+- cluster_role_binding.yaml
+- namespace_role.yaml
+patches:
+- patch: |-
+    $patch: delete
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRoleBinding
+    metadata:
+      name: manager-rolebinding
+- patch: |-
+    $patch: delete
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRole
+    metadata:
+      name: manager-role

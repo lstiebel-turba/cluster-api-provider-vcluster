@@ -1,0 +1,11 @@
+# infrastructure-components-flux.yaml: config/flux-installer with the manager flags as clusterctl
+# variables, see ../default.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- ../../flux-installer
+
+components:
+- ../variables
+- ../flux-variables

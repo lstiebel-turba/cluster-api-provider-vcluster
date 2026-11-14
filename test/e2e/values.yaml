@@ -1,4 +1,0 @@
-controlPlane:
-  service:
-    spec:
-      type: NodePort

@@ -28,6 +28,7 @@ testbin/*
 
 # release dir where infrastructure-components.yaml and other release artifacts will be created
 /release/
+/out/
 /zzz
 
 # devlopment tmp files
@@ -37,3 +38,6 @@ kubeconfig.yaml
 
 /tools
 custom-gcl
+
+# hack/e2e-kwok.sh downloads, builds and logs
+/.cache/

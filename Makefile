@@ -62,6 +62,16 @@ vet: ## Run go vet against code.
 test: manifests generate fmt vet envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" go test ./... -coverprofile cover.out
 
+.PHONY: e2e-kwok
+e2e-kwok: ## End-to-end test of the flux installer on a kwok cluster (no Docker; hack/e2e-kwok.sh).
+	hack/e2e-kwok.sh
+
+INSTALLER ?= helm
+
+.PHONY: e2e-kind
+e2e-kind: ## End-to-end test on kind with a real vCluster (INSTALLER=helm|flux; hack/e2e-kind.sh).
+	./hack/e2e-kind.sh $(INSTALLER)
+
 ##@ Build
 
 .PHONY: build
@@ -74,9 +84,6 @@ run: manifests generate fmt vet ## Run a controller from your host.
 
 .PHONY: docker-build
 docker-build: manifests generate fmt vet envtest ## Build docker image with the manager.
-	rm -r release || true
-	mkdir -p release
-	CGO_ENABLED=0 GOOS=linux GOARCH=$(TARGETARCH) go build -o release/manager main.go
 	docker buildx build --platform linux/$(TARGETARCH) --load -t ${IMG} .
 
 .PHONY: docker-push
@@ -119,7 +126,7 @@ undeploy: ## Undeploy controller from the K8s cluster specified in ~/.kube/confi
 CONTROLLER_GEN = $(shell pwd)/bin/controller-gen
 .PHONY: controller-gen
 controller-gen: ## Download controller-gen locally if necessary.
-	$(call go-get-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen@v0.16.0)
+	$(call go-get-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen@v0.20.0)
 
 KUSTOMIZE = $(shell which kustomize || echo $(shell pwd)/bin/kustomize)
 .PHONY: kustomize
@@ -142,21 +149,15 @@ endef
 
 ##@ Release
 
-RELEASE_DIR ?= release
-PULL_POLICY ?= Always
+# The newest release series in metadata.yaml, as a development version.
+VERSION ?= $(shell awk '$$2 == "major:" { m = $$3 } $$1 == "minor:" { print "v" m "." $$2 ".0-dev"; exit }' metadata.yaml)
+IMAGE ?= ghcr.io/loft-sh/cluster-api-provider-vcluster:$(VERSION)
+RELEASE_DIR ?= out
 
 .PHONY: release
-release: manifests kustomize ## Builds the manifests to publish with a release.
-	sed -i'' -e 's@image: .*@image: '"${IMG}"'@' ./config/default/manager_image_patch.yaml
-	sed -i'' -e 's@imagePullPolicy: IfNotPresent@imagePullPolicy: '"$(PULL_POLICY)"'@' ./config/default/manager_pull_policy_patch.yaml
-	sed -i'' -e 's@name: cluster-admin@name: $${CLUSTER_ROLE:=cluster-admin}@' ./config/rbac/provider_role_binding.yaml
-	mkdir -p $(RELEASE_DIR)/
-	$(KUSTOMIZE) build config/default > $(RELEASE_DIR)/infrastructure-components.yaml
-	cp templates/cluster-template* $(RELEASE_DIR)/
-	cp metadata.yaml $(RELEASE_DIR)/metadata.yaml
-	sed -i'' -e 's@image: .*@image: ghcr.io/loft-sh/cluster-api-provider-vcluster:main@' ./config/default/manager_image_patch.yaml
-	sed -i'' -e 's@imagePullPolicy: '"$(PULL_POLICY)"'@imagePullPolicy: IfNotPresent@' ./config/default/manager_pull_policy_patch.yaml
-	sed -i'' -e 's@name: $${CLUSTER_ROLE:=cluster-admin}@name: cluster-admin@' ./config/rbac/provider_role_binding.yaml
+release: manifests kustomize ## Writes the release assets to RELEASE_DIR (out/): VERSION=v0.4.0-turba.1 IMAGE=<repo>:<tag>[@sha256:<digest>].
+	VERSION="$(VERSION)" IMAGE="$(IMAGE)" RELEASE_DIR="$(RELEASE_DIR)" KUSTOMIZE="$(KUSTOMIZE)" hack/release.sh
+	RELEASE_DIR="$(abspath $(RELEASE_DIR))" go test ./test/release/...
 
 # Make sure to use the right remote TARGETARCH via make deploy-via-local-registry TARGETARCH=amd64
 .PHONY: deploy-via-local-registry
@@ -181,5 +182,5 @@ deploy-via-local-registry: docker-build # Pushes the locally build image into th
 	  # Kill the port-forward process
 	  kill $$PORT_FORWARD_PID || true
 	# Delete the existing controller
-	kubectl delete po -l control-plane=cluster-api-provider-vcluster-controller-manager -n cluster-api-provider-vcluster-system --ignore-not-found
+	kubectl delete po -l control-plane=capvc-controller-manager -n capvc-system --ignore-not-found
 	$(KUSTOMIZE) build config/dev | kubectl apply -f -

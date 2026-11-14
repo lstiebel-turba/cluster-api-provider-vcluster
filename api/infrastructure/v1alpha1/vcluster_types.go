@@ -25,6 +25,8 @@ import (
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
 // VClusterSpec defines the desired state of VCluster
+// helmRelease.installer may be set at create only: neither added, removed nor changed later.
+// +kubebuilder:validation:XValidation:rule="(has(self.helmRelease) && has(self.helmRelease.installer) ? self.helmRelease.installer : '-') == (has(oldSelf.helmRelease) && has(oldSelf.helmRelease.installer) ? oldSelf.helmRelease.installer : '-')",message="installer is immutable"
 type VClusterSpec struct {
 	// Important: Run "make" to regenerate code after modifying this file
 
@@ -41,6 +43,11 @@ type VClusterSpec struct {
 // VClusterStatus defines the observed state of VCluster
 type VClusterStatus struct {
 	// Important: Run "make" to regenerate code after modifying this file
+
+	// Initialization holds the Cluster API v1beta2 contract's initialization fields: provisioned
+	// for the VCluster as an infrastructure cluster, controlPlaneInitialized as a control plane.
+	// +optional
+	Initialization *VClusterInitializationStatus `json:"initialization,omitempty"`
 
 	// Ready defines if the virtual cluster control plane is ready.
 	// +optional
@@ -68,7 +75,10 @@ type VClusterStatus struct {
 
 	// Conditions holds several conditions the vcluster might be in
 	// +optional
-	Conditions Conditions `json:"conditions,omitempty"`
+	// +listType=map
+	// +listMapKey=type
+	// +kubebuilder:validation:MaxItems=32
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
 	// ObservedGeneration is the latest generation observed by the controller.
 	// +optional
@@ -78,15 +88,39 @@ type VClusterStatus struct {
 	// is externally managed.
 	// +optional
 	ExternalManagedControlPlane *bool `json:"externalManagedControlPlane,omitempty"`
+
+	// DeployedChartHash is the sha256 of the chart (repo, name, version) and values the helm
+	// installer last installed or upgraded: it upgrades again only when they change.
+	// +optional
+	// +kubebuilder:validation:MaxLength=64
+	DeployedChartHash string `json:"deployedChartHash,omitempty"`
+
+	// Installer is the installer that deploys the chart, recorded before the first deploy: later
+	// reconciles and the deletion keep it, whatever --installer says by then.
+	// +optional
+	// +kubebuilder:validation:Enum=helm;flux
+	Installer Installer `json:"installer,omitempty"`
+}
+
+// VClusterInitializationStatus holds the Cluster API v1beta2 contract's initialization fields.
+// +kubebuilder:validation:MinProperties=1
+type VClusterInitializationStatus struct {
+	// Provisioned is true once the VCluster is provisioned as an infrastructure cluster.
+	// +optional
+	Provisioned *bool `json:"provisioned,omitempty"`
+
+	// ControlPlaneInitialized is true once the vcluster API server accepts requests.
+	// +optional
+	ControlPlaneInitialized *bool `json:"controlPlaneInitialized,omitempty"`
 }
 
 // GetConditions returns the set of conditions for this object.
-func (v *VCluster) GetConditions() Conditions {
+func (v *VCluster) GetConditions() []metav1.Condition {
 	return v.Status.Conditions
 }
 
 // SetConditions sets the conditions on this object.
-func (v *VCluster) SetConditions(conditions Conditions) {
+func (v *VCluster) SetConditions(conditions []metav1.Condition) {
 	v.Status.Conditions = conditions
 }
 
@@ -94,6 +128,24 @@ type VirtualClusterHelmRelease struct {
 	// infos about what chart to deploy
 	// +optional
 	Chart VirtualClusterHelmChart `json:"chart,omitempty"`
+
+	// Installer installs the chart: helm (the provider runs helm) or flux (the provider writes a
+	// Flux HelmRelease, Flux's helm-controller installs it). Empty: the provider's --installer.
+	// +optional
+	// +kubebuilder:validation:Enum=helm;flux
+	Installer Installer `json:"installer,omitempty"`
+
+	// DriftDetection is the Flux HelmRelease's spec.driftDetection.mode (flux installer only;
+	// the helm installer detects no drift). Empty: the provider's --flux-drift-detection.
+	// +optional
+	// +kubebuilder:validation:Enum=enabled;warn;disabled
+	DriftDetection string `json:"driftDetection,omitempty"`
+
+	// PostRenderers are the Flux HelmRelease's spec.postRenderers (flux installer only).
+	// +optional
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:pruning:PreserveUnknownFields
+	PostRenderers []runtime.RawExtension `json:"postRenderers,omitempty"`
 
 	// the values for the given chart
 	// +optional
@@ -103,6 +155,17 @@ type VirtualClusterHelmRelease struct {
 	// +optional
 	ValuesObject *runtime.RawExtension `json:"valuesObject,omitempty"`
 }
+
+// Installer installs the vcluster chart.
+type Installer string
+
+const (
+	// HelmInstaller runs the helm CLI in the provider.
+	HelmInstaller Installer = "helm"
+
+	// FluxInstaller writes a Flux HelmRelease; Flux's helm-controller installs the chart.
+	FluxInstaller Installer = "flux"
+)
 
 type VirtualClusterHelmChart struct {
 	// the name of the helm chart

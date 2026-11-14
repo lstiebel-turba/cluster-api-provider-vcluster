@@ -130,6 +130,99 @@ spec:
     port: "443"
 ```
 
+## End-to-end test
+
+`make e2e-kind INSTALLER=helm` (or `flux`) runs `hack/e2e-kind.sh`: a kind cluster with Cluster API
+core, cert-manager, the provider image built from this checkout (`helm`: `config/default`; `flux`:
+`config/flux-installer/namespaced` with a RoleBinding per namespace and `--namespace-selector`) and,
+for `flux`, Flux's source- and helm-controller; then a real vCluster (values
+`test/e2e/kind/vcluster.yaml`) is created, parked and woken, deleted and, for `flux`, adopted from a
+hand-written HelmRelease. Needs kind,
+kubectl, curl and docker (or podman with `KIND_EXPERIMENTAL_PROVIDER=podman`); the header of the
+script lists its options. CI runs it on every pull request (`.github/workflows/e2e-kind.yaml`).
+
+# Releases
+
+A tag `v<major>.<minor>.<patch>-turba.<n>` (for example `v0.4.0-turba.1`) runs
+`.github/workflows/release.yaml`: the image `ghcr.io/<owner>/<repo>:<tag>` (amd64 and arm64,
+owner and repository from the GitHub repository, lowercase), then a GitHub Release with these assets:
+
+| Asset | |
+| --- | --- |
+| `infrastructure-components.yaml` | `config/default`: helm installer, its chart rights ([config/rbac/README.md](config/rbac/README.md)). |
+| `infrastructure-components-flux.yaml` | `config/flux-installer`: `--installer=flux`, no chart rights. |
+| `infrastructure-components-flux-namespaced.yaml` | `config/flux-installer/namespaced`: rights per namespace by your RoleBindings. |
+| `metadata.yaml` | Release series to contract: `0.4` is `v1beta2`. |
+| `cluster-template.yaml` | `clusterctl generate cluster`. |
+
+The provider runs in `capvc-system`, the image pinned by tag and digest. `<major>.<minor>` must be a
+release series in `metadata.yaml` (add one with a new contract); `-turba.<n>` counts the builds of
+this fork of one upstream version. `make release VERSION=<tag> IMAGE=<image>:<tag>[@sha256:<digest>]`
+writes the same files to `out/` and checks them (`test/release`).
+
+The manager flags are clusterctl variables, each with a default, so neither clusterctl nor the
+Cluster API Operator needs one:
+
+| Variable | Flag | Default |
+| --- | --- | --- |
+| `CAPVC_WATCH_NAMESPACES` | `--namespace` | empty: all |
+| `CAPVC_NAMESPACE_SELECTOR` | `--namespace-selector` | empty: all |
+| `CAPVC_REQUIRE_CHART_VERSION` | `--require-chart-version` | `false` |
+| `CAPVC_CONCURRENCY` | `--concurrency` | `4` |
+| `CAPVC_FLUX_REPOSITORY_NAME` (flux assets) | `--flux-repository-name` | empty: one HelmRepository per VCluster |
+| `CAPVC_FLUX_REPOSITORY_PROVIDER` (flux assets) | `--flux-repository-provider` | empty |
+| `CAPVC_FLUX_DRIFT_DETECTION` (flux assets) | `--flux-drift-detection` | `enabled` |
+| `CAPVC_FLUX_SERVICE_ACCOUNT` (flux assets) | `--flux-service-account` | empty: helm-controller's own account |
+
+clusterctl, with the fork in `~/.config/cluster-api/clusterctl.yaml`:
+
+```yaml
+providers:
+- name: vcluster
+  type: InfrastructureProvider
+  url: https://github.com/<owner>/<repo>/releases/latest/infrastructure-components.yaml
+```
+
+```shell
+clusterctl init --infrastructure vcluster:v0.4.0-turba.1
+```
+
+The [Cluster API Operator](https://cluster-api-operator.sigs.k8s.io) installs the provider from an
+`InfrastructureProvider` named `vcluster`, either from the release (`fetchConfig.url`, the file name
+picks the asset) or from a ConfigMap (`fetchConfig.selector`, no access to GitHub needed):
+
+```yaml
+apiVersion: operator.cluster.x-k8s.io/v1alpha2
+kind: InfrastructureProvider
+metadata:
+  name: vcluster
+  namespace: capvc-system
+spec:
+  version: v0.4.0-turba.1
+  configSecret:            # optional: the CAPVC_* variables as keys
+    name: vcluster-variables
+  fetchConfig:
+    url: https://github.com/<owner>/<repo>/releases/latest/infrastructure-components-flux.yaml
+    # or, from a ConfigMap:
+    # selector:
+    #   matchLabels:
+    #     provider-components: vcluster
+```
+
+The ConfigMap is named after the version, in the provider's namespace, labelled
+`provider-components: vcluster`, with the release's components under `components` and its
+`metadata.yaml` under `metadata`:
+
+```shell
+kubectl create configmap v0.4.0-turba.1 -n capvc-system \
+  --from-file=components=infrastructure-components-flux.yaml --from-file=metadata=metadata.yaml \
+  --dry-run=client -o yaml |
+  kubectl label --local -f - provider-components=vcluster -o yaml >vcluster-v0.4.0-turba.1.yaml
+```
+
+Pin `spec.version`: clusterctl lists versions through the Go proxy first, and the Go module path
+(`github.com/loft-sh/cluster-api-provider-vcluster`) is not the fork's.
+
 # Development instructions
 
 Prerequisites:

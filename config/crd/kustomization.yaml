@@ -3,9 +3,6 @@
 # It should be run by config/default
 resources:
 - bases/infrastructure.cluster.x-k8s.io_vclusters.yaml
-- bases/infrastructure.cluster.x-k8s.io_vnodeclusters.yaml
-- bases/infrastructure.cluster.x-k8s.io_vnodemachines.yaml
-- bases/infrastructure.cluster.x-k8s.io_vnodemachinetemplates.yaml
 - bases/controlplane.cluster.x-k8s.io_vclusters.yaml
 #+kubebuilder:scaffold:crdkustomizeresource
 
@@ -28,6 +25,5 @@ commonLabels:
   # When using CAPI we need to define the contract version labels so that the
   # capi system can cross reference the proper controlplane & infra refs
   # https://cluster-api.sigs.k8s.io/developer/providers/v1alpha2-to-v1alpha3.html#apply-the-contract-version-label-clusterx-k8sioversion-version1_version2_version3-to-your-crds
-  cluster.x-k8s.io/v1alpha3: v1alpha1
-  cluster.x-k8s.io/v1alpha4: v1alpha1
   cluster.x-k8s.io/v1beta1: v1alpha1
+  cluster.x-k8s.io/v1beta2: v1alpha1

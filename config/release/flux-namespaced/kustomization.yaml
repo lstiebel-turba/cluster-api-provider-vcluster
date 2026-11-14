@@ -1,0 +1,11 @@
+# infrastructure-components-flux-namespaced.yaml: config/flux-installer/namespaced with the manager
+# flags as clusterctl variables, see ../default.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- ../../flux-installer/namespaced
+
+components:
+- ../variables
+- ../flux-variables

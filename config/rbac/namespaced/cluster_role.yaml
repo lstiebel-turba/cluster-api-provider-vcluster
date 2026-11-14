@@ -1,0 +1,71 @@
+# The cluster-wide part of manager-role (../role.yaml): what has no namespace or is watched in all
+# (the HelmReleases' metadata too: the cache watches them wherever it watches VClusters).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-cluster-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - namespaces
+  verbs:
+  - get
+- apiGroups:
+  - cluster.x-k8s.io
+  resources:
+  - clusters
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - helm.toolkit.fluxcd.io
+  resources:
+  - helmreleases
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - controlplane.cluster.x-k8s.io
+  - infrastructure.cluster.x-k8s.io
+  resources:
+  - vclusters
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - controlplane.cluster.x-k8s.io
+  - infrastructure.cluster.x-k8s.io
+  resources:
+  - vclusters/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - controlplane.cluster.x-k8s.io
+  - infrastructure.cluster.x-k8s.io
+  resources:
+  - vclusters/status
+  verbs:
+  - patch
+- apiGroups:
+  - infrastructure.cluster.x-k8s.io
+  resources:
+  - kubevirtclusters
+  - nutanixclusters
+  - openstackclusters
+  - packetclusters
+  verbs:
+  - get
+  - patch
+- apiGroups:
+  - infrastructure.cluster.x-k8s.io
+  resources:
+  - kubevirtclusters/status
+  - nutanixclusters/status
+  - packetclusters/status
+  verbs:
+  - patch

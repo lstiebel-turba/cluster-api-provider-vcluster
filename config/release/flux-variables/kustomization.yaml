@@ -1,0 +1,9 @@
+# The flux installer's flags as clusterctl variables.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+patches:
+- target:
+    kind: Deployment
+    name: capvc-controller-manager
+  path: patch.yaml

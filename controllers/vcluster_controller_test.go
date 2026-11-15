@@ -691,6 +691,31 @@ func TestFluxInstallerDeletesVolumesAfterTheChart(t *testing.T) {
 	}
 }
 
+// A HelmRelease removed by someone else (an adoption rolled back, a hand delete) is not the
+// provider's uninstall: the chart may still run, so deleting the VCluster keeps every volume.
+func TestFluxInstallerKeepsVolumesWithoutItsOwnDelete(t *testing.T) {
+	deleted, kept := chartVolumes()
+	e := newFluxEnv(t, append(append([]client.Object{&clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "ns"}}, fluxVCluster()}, deleted...), kept...)...)
+	e.reconcile(2)
+	if err := e.c.Delete(context.Background(), e.helmRelease()); err != nil {
+		t.Fatal(err)
+	}
+	vc := &infrastructurev1alpha1.VCluster{}
+	if err := e.c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "vc1"}, vc); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.c.Delete(context.Background(), vc); err != nil {
+		t.Fatal(err)
+	}
+	e.reconcile(1)
+	if got := e.volumes(); len(got) != len(deleted)+len(kept) {
+		t.Errorf("volumes deleted without the provider's uninstall: %v", got)
+	}
+	if err := e.c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "vc1"}, vc); !kerrors.IsNotFound(err) {
+		t.Errorf("VCluster still there: %v %v", err, vc.Finalizers)
+	}
+}
+
 func TestHelmInstallerDeletesVolumes(t *testing.T) {
 	deleted, kept := chartVolumes()
 	vc := ownedVCluster()

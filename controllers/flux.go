@@ -270,15 +270,20 @@ func (r *GenericReconciler) fluxSetSuspend(ctx context.Context, release *unstruc
 	return r.Client.Patch(ctx, release, client.RawPatch(types.MergePatchType, patch))
 }
 
+// releaseDeletedAnnotation marks a VCluster whose HelmRelease the provider itself deleted: only
+// then is a missing HelmRelease the provider's uninstall, and the chart's volumes go too.
+const releaseDeletedAnnotation = "vcluster.loft.sh/release-deleted"
+
 // fluxRemove deletes the HelmRelease, Flux uninstalls the chart; gone once it no longer exists.
 // A per-VCluster HelmRepository goes with the VCluster (owner reference). A HelmRelease of that
 // name the VCluster doesn't control is left alone: gone, but not owned, so the chart's volumes
-// stay too.
+// stay too. So does a HelmRelease that is missing without the provider deleting it (never
+// written, or removed by someone else): the chart may still run, and its volumes hold its data.
 func (r *GenericReconciler) fluxRemove(ctx context.Context, vCluster GenericVCluster) (gone, owned bool, err error) {
 	release := newUnstructured(helmReleaseGVK, vCluster.GetNamespace(), vCluster.GetName())
 	err = r.Client.Get(ctx, types.NamespacedName{Namespace: vCluster.GetNamespace(), Name: vCluster.GetName()}, release)
 	if kerrors.IsNotFound(err) {
-		return true, true, nil
+		return true, vCluster.GetAnnotations()[releaseDeletedAnnotation] == "true", nil
 	}
 	if err != nil {
 		return false, false, err
@@ -291,9 +296,24 @@ func (r *GenericReconciler) fluxRemove(ctx context.Context, vCluster GenericVClu
 		if err := r.fluxSetSuspend(ctx, release, false); err != nil {
 			return false, true, err
 		}
+		if err := r.markReleaseDeleted(ctx, vCluster); err != nil {
+			return false, true, err
+		}
 		if err := r.Client.Delete(ctx, release); err != nil && !kerrors.IsNotFound(err) {
 			return false, true, err
 		}
 	}
 	return false, true, nil
+}
+
+// markReleaseDeleted sets releaseDeletedAnnotation before the provider deletes the HelmRelease.
+func (r *GenericReconciler) markReleaseDeleted(ctx context.Context, vCluster GenericVCluster) error {
+	if vCluster.GetAnnotations()[releaseDeletedAnnotation] == "true" {
+		return nil
+	}
+	patch, err := json.Marshal(map[string]any{"metadata": map[string]any{"annotations": map[string]string{releaseDeletedAnnotation: "true"}}})
+	if err != nil {
+		return err
+	}
+	return r.Client.Patch(ctx, vCluster, client.RawPatch(types.MergePatchType, patch))
 }
